@@ -1,0 +1,1834 @@
+---
+title: Data analysis for Interactions in self-assembled microbial communities saturate
+  with diversity
+author: 'Xiaoqian Yu, xy43@mit.edu, @seaweedomics '
+date: "September 12, 2018"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr:: opts_knit$set(root.dir = "https://github.com/cusoiv/diversity_interactions_data_tables/")
+```
+
+## 
+
+This is the analysis for the paper "Interactions in self-assembled microbial communities saturate with diversity"
+
+## Load Libraries
+```{r include=FALSE}
+
+library(plyr)
+library(reshape)
+library(caret)
+library(vegan)
+library(propagate)
+library(scales)
+library(dplyr)
+library(reshape)
+library(gsubfn)
+library(lattice)
+library(rlist)
+library(plotrix)
+library(xtable)
+library(car)
+
+
+```
+
+
+
+
+## Import Data
+
+
+```{r}
+#Read in community production data
+
+# Community production data for self-assembled communites on SSM (in Stage 1: Serial Dilution)
+
+R2_cc=read.csv("R2_cc_summary.csv",row.names = 1)   # Cell count data 
+R2_rf=read.csv("R2_rf_summary.csv",row.names = 1)   # protein fluorscence 
+R2_CO2=read.csv("R2_CO2_summary_V3.csv",row.names = 1)  # accumulated CO2 production over 110h
+R2_CO2_early_40h=read.csv("R2_CO2_early_summary.csv",row.names = 1)  #accumulated CO2 production 0-40h
+R2_CO2_late_40h=read.csv("R2_CO2_late_summary.csv",row.names = 1)  #accumulated CO2 production 40-110h
+
+# Community production data for low diversity communities/monocultures on SSM (in Stage 2: Dilution-to-extinction)
+  
+G_cc=read.csv('isolate_cc_summary.csv',row.names = 1) # Cell count data 
+G_rf=read.csv('isolate_rf_summary.csv',row.names = 1) # protein fluorscence
+#G_CO2=read.csv('isolate_CO2_summary_V2.csv',row.names = 1)   # accumulated CO2 production over 160h
+G_CO2_early_40h=read.csv('isolate_CO2_summary_early.csv',row.names = 1) #accumulated CO2 production 0-40h
+#G_CO2_late_40h=read.csv('isolate_CO2_summary_late.csv',row.names = 1) #accumulated CO2 production 40-160h
+
+# Growth curves for cell density measurements
+R2_cc_all_times=read.csv("R2_cc_all_times.csv",row.names = 1,header = F)
+time_points=read.csv("R2_sample_time.csv",row.names = 1,header = F)
+
+
+```
+
+```{r}
+#Clean community production data 
+
+# Only keep samples that are confidently above blank measurements 
+R2_cc_1=R2_cc[apply(R2_cc,1,function(x)any(x>1*10^6)),,drop=F]   
+R2_rf_1=R2_rf[apply(R2_rf,1,function(x)any(x>0.02)),,drop=F]  
+R2_CO2_1=R2_CO2[apply(R2_CO2,1,function(x)any(x>0.5)),,drop=F] 
+R2_CO2_early_40h_1=R2_CO2_early_40h[apply(R2_CO2_early_40h,1,function(x)any(x>0.2)),,drop=F]
+R2_CO2_late_40h_1=R2_CO2_late_40h[apply(R2_CO2_late_40h,1,function(x)any(x>0.3)),,drop=F]
+G_cc_1=G_cc[apply(G_cc,1,function(x)any(x>1*10^6)),,drop=F]
+G_rf_1=G_rf[apply(G_rf,1,function(x)any(x>0.02)),,drop=F]
+#G_CO2_1=G_CO2[apply(G_CO2,1,function(x)any(x>0.5)),,drop=F]
+G_CO2_early_40h_1=G_CO2_early_40h[apply(G_CO2_early_40h,1,function(x)any(x>0.1)),,drop=F]
+#G_CO2_late_40h_1=G_CO2_late_40h[apply(G_CO2_late_40h,1,function(x)any(x>0.3)),,drop=F]
+
+# Data formatting
+rownames(R2_cc_1)=paste("X",rownames(R2_cc_1),sep="")
+rownames(R2_rf_1)=paste("X",rownames(R2_rf_1),sep="")
+rownames(R2_CO2_1)=paste("X",rownames(R2_CO2_1),sep="")
+rownames(R2_CO2_early_40h_1)=paste("X",rownames(R2_CO2_early_40h_1),sep="")
+rownames(R2_CO2_late_40h_1)=paste("X",rownames(R2_CO2_late_40h_1),sep="")
+
+```
+
+```{r}
+#Read in ASV data  (dada2 processed and 16S copy number corrected)
+
+otu_swe_16S=read.csv("dada2_swe_16S_corrected.csv",row.names=1)   # inoculate communities
+otu_R2_16S=read.csv("dada2_R2_16S_corrected.csv",row.names=1) # self-assembled communites on SSM
+otu_G_16S=read.csv("dada2_G_16S_corrected.csv",row.names=1)       #Dilution-to-extinction generated communities
+
+#Scale data so that total abundance in each sample is 1
+otu_R2_scale_16S=as.data.frame(scale(otu_R2_16S,center=F,scale=colSums(otu_R2_16S))) 
+otu_G_scale_16S=as.data.frame(scale(otu_G_16S,center=F,scale=colSums(otu_G_16S)))
+otu_swe_scale_16S=as.data.frame(scale(otu_swe_16S,center=F,scale=colSums(otu_swe_16S)))
+
+```
+
+```{r,results=T}
+#summary for cleaned ASV tables, ASVs as rows and samples as columns 
+dim(otu_R2_scale_16S)
+dim(otu_G_scale_16S)
+dim(otu_swe_scale_16S)
+```
+
+```{r}
+## Select for single isolate communities from the G dataset
+#select communities that have >0.9 of one OTU and also only keep the OTUs that come up as single OTUs
+otu_G_single_16S=otu_G_scale_16S[apply(otu_G_scale_16S,1,function(x)any(x>0.9)),apply(otu_G_scale_16S,2,function(x)any(x>0.9))]
+
+
+```
+
+
+```{r,results=T}
+
+#check number of monocultures 
+dim(otu_G_single_16S)  #39 taxa represented by a total of 275 samples
+
+```
+
+
+##Figure 2
+```{r}
+set.seed(3)  #set seed for reproducibility
+
+
+#Calculate Diversity of Inocula and self-assembled communities
+
+#Inocula taxonomic richness 
+otu_swe_16S_2=as.data.frame(t(otu_swe_16S))
+otu_swe_16S_2=round(otu_swe_16S_2)
+
+div_swe_16S=matrix(,nrow=nrow(otu_swe_16S_2))
+div_swe_16S[,1]=apply(otu_swe_16S,2,function(x)sum(x>0))
+div_swe_16S=as.data.frame(div_swe_16S)
+rownames(div_swe_16S)=rownames(otu_swe_16S_2)
+
+#Self-assembled communities taxonomic richness
+otu_R2_sr_16S=as.data.frame(apply(otu_R2_16S,2,function(x)sum(x>0)))
+
+#find matching inoculum for every self-assembled community
+otu_R2_sr_16S$initial=substr(rownames(otu_R2_sr_16S),0,5)  
+
+```
+
+#Cell Count vs. Inocula taxonomic richness
+```{r,message=FALSE,warning=FALSE}
+
+
+R2_cc_initial=as.data.frame(substr(rownames(R2_cc_1),0,5))
+R2_cc_agg=aggregate(R2_cc_1[,1],list(R2_cc_initial[,1]),mean)
+R2_cc_agg_sd=aggregate(R2_cc_1[,1],list(R2_cc_initial[,1]),sd)
+R2_cc_agg=merge(R2_cc_agg,R2_cc_agg_sd,by='Group.1')
+
+names(R2_cc_agg)=c('initial','cc','sd')    #mean and sd of cell count measurements
+
+otu_R2_cc_initial_agg=merge(div_swe_16S, R2_cc_agg,by.x=0,by.y='initial')
+names(otu_R2_cc_initial_agg)[2]="start_species_richness"
+d_cc=otu_R2_cc_initial_agg[,2:4]
+
+#functions for fitting curve to data
+m_cc=nls(cc~a*(start_species_richness)/(b+start_species_richness),start=list(a=3*10^7,b=5),data=d_cc,trace=F)
+m1_cc=nls(cc~a*(start_species_richness)+b,start=list(a=3*10^7,b=5),data=d_cc,trace=F)
+m2_cc=nls(cc~a*log(start_species_richness)+b,start=list(a=3*10^7,b=5),data=d_cc,trace=F)
+
+AIC(m_cc)
+AIC(m1_cc)
+AIC(m2_cc)
+
+
+#propograte confidence of fit
+s0_cc=sort(otu_R2_cc_initial_agg$start_species_richness)
+s_cc=data.frame(start_species_richness=s0_cc)
+fitted_cc=predictNLS(m_cc,newdata=s_cc,interval = "confidence")
+
+#R^2 of fit
+RSS.p=sum(residuals(m_cc)^2)
+TSS=sum((d_cc$cc - mean(d_cc$cc))^2)
+R2=1-RSS.p/TSS    
+R2
+
+
+
+```
+#CO2 vs. Inocula taxonomic richness
+```{r,message=FALSE,warning=FALSE}
+
+
+
+R2_CO2_initial=as.data.frame(substr(rownames(R2_CO2_1),0,5))
+R2_CO2_agg=aggregate(R2_CO2_1[,1],list(R2_CO2_initial[,1]),mean)
+R2_CO2_agg_sd=aggregate(R2_CO2_1[,1],list(R2_CO2_initial[,1]),sd)
+R2_CO2_agg=merge(R2_CO2_agg,R2_CO2_agg_sd,by='Group.1')
+
+names(R2_CO2_agg)=c('initial','CO2','sd')    #mean and sd of cell count measurements
+
+
+otu_R2_CO2_initial_agg=merge(div_swe_16S, R2_CO2_agg,by.x=0,by.y='initial')
+names(otu_R2_CO2_initial_agg)[2]="start_species_richness"
+d_CO2=otu_R2_CO2_initial_agg[,2:4]
+
+#hyperbolic function for fitting curve to data
+m_CO2=nls(CO2~a*(start_species_richness)/(b+start_species_richness),start=list(a=6,b=5),data=d_CO2,trace=T)
+
+#propograte confidence of fit
+s0_CO2=sort(otu_R2_CO2_initial_agg$start_species_richness)
+s_CO2=data.frame(start_species_richness=s0_CO2)
+fitted_CO2=predictNLS(m_CO2,newdata=s_CO2,interval="confidence")
+
+#R^2 of fit
+RSS.p=sum(residuals(m_CO2)^2)
+TSS=sum((d_CO2$CO2 - mean(d_CO2$CO2))^2)
+R2=1-RSS.p/TSS     
+R2
+
+```
+
+#protein/cell vs. Inocula taxonomic richness
+```{r,message=FALSE,warning=FALSE}
+R2_rf_cc_1=merge(R2_rf_1,R2_cc_1,by=0)
+R2_rf_cc_1$ratio=R2_rf_cc_1$rf/(R2_rf_cc_1$cc/2000)  #the /2000 is because converting from cell density to no of cells
+R2_rf_cc_initial=as.data.frame(substr(R2_rf_cc_1$Row.names,0,5))
+R2_rf_cc_agg=aggregate(R2_rf_cc_1$ratio,list(R2_rf_cc_initial[,1]),mean)
+R2_rf_cc_agg_sd=aggregate(R2_rf_cc_1$ratio,list(R2_rf_cc_initial[,1]),sd)
+R2_rf_cc_agg=merge(R2_rf_cc_agg,R2_rf_cc_agg_sd,by='Group.1')
+
+names(R2_rf_cc_agg)=c('initial','ratio','sd')
+
+
+otu_R2_rf_cc_initial_agg=merge(div_swe_16S, R2_rf_cc_agg,by.x=0,by.y='initial')
+names(otu_R2_rf_cc_initial_agg)[2]="start_species_richness"
+d_rf_cc=otu_R2_rf_cc_initial_agg[,2:4]
+
+#fit to inversely proportional relationship
+m_rf_cc=nls(ratio~a/(b+start_species_richness)+c,start=list(a=3*10^-4,b=5,c=0),data=d_rf_cc,trace=T)
+
+#propogate confidence of fit
+s0_rf_cc=sort(otu_R2_rf_cc_initial_agg$start_species_richness)
+s_rf_cc=data.frame(start_species_richness=s0_rf_cc)
+fitted_rf_cc=predictNLS(m_rf_cc,newdata=s_rf_cc,interval="confidence")
+
+#R^2 calculation
+RSS.p <- sum(residuals(m_rf_cc)^2)
+TSS <- sum((d_rf_cc$ratio - mean(d_rf_cc$ratio))^2)
+R2=1-RSS.p/TSS     
+R2
+```
+
+#Cell density vs. taxonomic richness
+```{r,message=FALSE,warning=FALSE}
+
+otu_R2_cc=merge(otu_R2_sr_16S,R2_cc_1,by=0)
+names(otu_R2_cc)[2]="sr"
+otu_R2_cc_agg=aggregate(otu_R2_cc[,c(2,4)],list(otu_R2_cc$initial),mean)
+otu_R2_cc_agg_sd=aggregate(otu_R2_cc[,c(2,4)],list(otu_R2_cc$initial),sd)
+otu_R2_cc_agg=merge(otu_R2_cc_agg,otu_R2_cc_agg_sd,by='Group.1')
+
+names(otu_R2_cc_agg)[2:5]=c("stationary_species_richness","cc","sr.sd","cc.sd")
+d_scc=otu_R2_cc_agg[,2:5]
+
+#fit to Hyperbolic model 
+
+m_scc=nls(cc~a*(stationary_species_richness)/(b+stationary_species_richness),start=list(a=3*10^7,b=5),data=d_scc,trace=T)
+m1_scc=nls(cc~a*(stationary_species_richness)+b,start=list(a=3*10^7,b=5),data=d_scc,trace=T)
+m2_scc=nls(cc~a*log(stationary_species_richness)+b,start=list(a=3*10^7,b=5),data=d_scc,trace=T)
+
+AIC(m_scc)
+AIC(m1_scc)
+AIC(m2_scc)
+
+#Propogate confidence of fit
+s0_scc=sort(d_scc$stationary_species_richness)
+s_scc=data.frame(stationary_species_richness=d_scc$stationary_species_richness,d_scc$sr.sd)
+s_scc=s_scc[order(d_scc$stationary_species_richness),]
+s_scc_data=data.frame(stationary_species_richness=s_scc$stationary_species_richness)
+s_scc_error=data.frame(stationary_species_richness=s_scc$d_scc.sr.sd)
+
+fitted_scc=predictNLS(m_scc,newdata=s_scc_data,newerror=s_scc_error, interval="confidence")
+
+#Calculate R^2
+RSS.p <- sum(residuals(m2_scc)^2)
+TSS <- sum((d_scc$cc - mean(d_scc$cc))^2)
+R2=1-RSS.p/TSS     
+R2
+```
+#CO2 vs. stationary taxonomic richness
+```{r,message=FALSE,warning=FALSE}
+otu_R2_CO2=merge(otu_R2_sr_16S,R2_CO2_1,by=0)
+names(otu_R2_CO2)[2]="sr"
+otu_R2_CO2_agg=aggregate(otu_R2_CO2[,c(2,4)],list(otu_R2_CO2$initial),mean)
+otu_R2_CO2_agg_sd=aggregate(otu_R2_CO2[,c(2,4)],list(otu_R2_CO2$initial),sd)
+
+otu_R2_CO2_agg=merge(otu_R2_CO2_agg,otu_R2_CO2_agg_sd,by='Group.1')
+names(otu_R2_CO2_agg)[2:5]=c("stationary_species_richness","CO2","sr.sd","CO2.sd")
+d_sCO2=otu_R2_CO2_agg[,2:5]
+
+#Fit to hyperbolic model
+m_sCO2=nls(CO2~a*(stationary_species_richness)/(b+stationary_species_richness),start=list(a=6,b=5),data=d_sCO2,trace=T)
+m1_sCO2=nls(CO2~a*(stationary_species_richness)+b,start=list(a=6,b=5),data=d_sCO2,trace=T)
+m2_sCO2=nls(CO2~a*log(stationary_species_richness)+b,start=list(a=6,b=5),data=d_sCO2,trace=T)
+
+AIC(m_sCO2)
+AIC(m1_sCO2)
+AIC(m2_sCO2)
+
+
+#Propogate confidence of fit
+s0_sCO2=sort(d_sCO2$stationary_species_richness)
+s_sCO2=data.frame(stationary_species_richness=d_sCO2$stationary_species_richness,d_sCO2$sr.sd)
+s_sCO2=s_sCO2[order(d_sCO2$stationary_species_richness),]
+s_sCO2_data=data.frame(stationary_species_richness=s_sCO2$stationary_species_richness)
+s_sCO2_error=data.frame(stationary_species_richness=s_sCO2$d_sCO2.sr.sd)
+
+fitted_sCO2=predictNLS(m_sCO2,newdata=s_sCO2_data,newerror=s_sCO2_error,interval="confidence")
+
+#Calculate R^2 of fit
+RSS.p <- sum(residuals(m_sCO2)^2)
+TSS <- sum((d_sCO2$CO2 - mean(d_sCO2$CO2))^2)
+R2=1-RSS.p/TSS     
+R2
+```
+#protein per cell vs. stationary taxonomic richness
+```{r,message=FALSE,warning=FALSE}
+otu_R2_rf_cc=merge(otu_R2_sr_16S,R2_rf_cc_1,by.x=0,by.y='Row.names')
+names(otu_R2_rf_cc)[2]="sr"
+otu_R2_rf_cc_agg=aggregate(otu_R2_rf_cc[,c(2,6)],list(otu_R2_rf_cc$initial),mean)
+otu_R2_rf_cc_agg_sd=aggregate(otu_R2_rf_cc[,c(2,6)],list(otu_R2_rf_cc$initial),sd)
+
+otu_R2_rf_cc_agg=merge(otu_R2_rf_cc_agg,otu_R2_rf_cc_agg_sd,by='Group.1')
+names(otu_R2_rf_cc_agg)[2:5]=c("stationary_species_richness","ratio","sr.sd","ratio.sd")
+d_srf_cc=otu_R2_rf_cc_agg[,2:5]
+
+
+
+m_srf_cc=nls(ratio~a/stationary_species_richness+b,start=list(a=-3*10^-5,b=0),data=d_srf_cc,trace=T)
+m1_srf_cc=nls(ratio~a*stationary_species_richness+b,
+             start=list(a=-3*10^-5,b=0),data=d_srf_cc,trace=T)
+m2_srf_cc=nls(ratio~a*log(stationary_species_richness)+b,start=list(a=-3*10^-5,b=0),data=d_srf_cc,trace=T)
+
+AIC(m_srf_cc)
+AIC(m1_srf_cc)
+AIC(m2_srf_cc)
+
+#Propagate confidence of fit
+s0_srf_cc=sort(d_srf_cc$stationary_species_richness)
+s_srf_cc=data.frame(stationary_species_richness=d_srf_cc$stationary_species_richness,d_srf_cc$sr.sd)
+s_srf_cc=s_srf_cc[order(d_srf_cc$stationary_species_richness),]
+s_srf_cc_data=data.frame(stationary_species_richness=s_srf_cc$stationary_species_richness)
+s_srf_cc_error=data.frame(stationary_species_richness=s_srf_cc$d_srf_cc.sr.sd)
+
+fitted_srf_cc=predictNLS(m1_srf_cc,newdata=s_srf_cc_data,newerror=s_srf_cc_error,interval="confidence")
+
+#Calculate R^2
+RSS.p <- sum(residuals(m2_srf_cc)^2)
+TSS <- sum((d_srf_cc$ratio - mean(d_srf_cc$ratio))^2)
+R2=1-RSS.p/TSS     
+R2
+```
+#define some colors
+```{r}
+
+tomato1_alpha=alpha('tomato1',0.4)
+darkcyan_alpha=alpha('darkcyan',0.4)
+goldenrod3_alpha=alpha('goldenrod3',0.4)
+bluegrey= c('#deebf7')
+```
+
+#Putting all 6 plots together into same picture
+```{r}
+
+
+#png('./16S_adjusted_new/fig_paper/all_curves_combined_16S_adjusted_protein_per_cell_sd.png',width=4000,height=2400,res=300)
+par(mfrow=c(2,3),cex=1.5)
+par(mar = c(3,3,1.5,1))
+
+##pic1
+
+plot(otu_R2_cc_initial_agg$start_species_richness,otu_R2_cc_initial_agg$cc,pch=20,col='tomato1',
+     cex.lab=1,cex.axis=1,xlab="",ylab="",ylim=c(0,5*10^7),xaxt='n',yaxt='n')
+
+
+title(ylab="Max. cell count/mL",line=2)
+polygon(c(s0_cc, rev(s0_cc)), c(fitted_cc$summary[,5], rev(fitted_cc$summary[,6])),col =bluegrey, border = NA)
+lines(s0_cc,fitted_cc$summary[,1], lty = 1, col = "grey26",lwd=3)
+arrows(d_cc$start_species_richness,d_cc$cc-d_cc$sd,d_cc$start_species_richness,d_cc$cc+d_cc$sd, length = 0,col=tomato1_alpha,lwd=2)
+points(otu_R2_cc_initial_agg$start_species_richness,otu_R2_cc_initial_agg$cc,pch=20,col="tomato1")
+text(250,5*10^6,expression(r^{2}~"=0.30"))
+axis(1,c(0,100,200,300))
+axis(2,c(0,2*10^7,4*10^7))
+
+#pic2
+plot(otu_R2_rf_cc_initial_agg$start_species_richness,otu_R2_rf_cc_initial_agg$ratio,pch=20,col='darkcyan',
+          cex.lab=1,cex.axis=1,xlab="",ylab="",ylim=c(0,8*10^-5),xaxt='n',yaxt='n')
+     title(xlab="Inoculum taxonomic richness",ylab="Protein(RFU/cell)",line=2)
+   
+     polygon(c(s0_rf_cc, rev(s0_rf_cc)), c(fitted_rf_cc$summary[,5], rev(fitted_rf_cc$summary[,6])),col =bluegrey, border = NA)
+     lines(s0_rf_cc,fitted_rf_cc$summary[,1], lty = 1, col = "grey26",lwd=3)
+     arrows(d_rf_cc$start_species_richness,d_rf_cc$ratio-d_rf_cc$sd,d_rf_cc$start_species_richness,d_rf_cc$ratio+d_rf_cc$sd, 
+            length =0,col=darkcyan_alpha,lwd=2)  
+     points(otu_R2_rf_cc_initial_agg$start_species_richness,otu_R2_rf_cc_initial_agg$ratio,pch=20,col="darkcyan")
+     text(250,0.6*10^-5,expression(r^{2}~"=0.25"))
+     axis(1,c(0,100,200,300))
+     axis(2,c(0,4*10^-5,8*10^-5))
+#pic 3
+     plot(otu_R2_CO2_initial_agg$start_species_richness,otu_R2_CO2_initial_agg$CO2,pch=20,col="goldenrod3",ylim=c(0,7)
+          ,cex.lab=1,cex.axis=1,xlab="",ylab="",xaxt='n',yaxt='n')
+     
+     title(ylab=expression("CO"[2]* "("~paste(mu,g)~")"),line=2)
+     polygon(c(s0_CO2, rev(s0_CO2)), c(fitted_CO2$summary[,5], rev(fitted_CO2$summary[,6])),col = bluegrey, border = NA)
+     lines(s0_CO2,fitted_CO2$summary[,1], lty = 1, col = "grey26",lwd=3)
+     arrows(d_CO2$start_species_richness,d_CO2$CO2-d_CO2$sd,d_CO2$start_species_richness,d_CO2$CO2+d_CO2$sd, 
+            length = 0,col=goldenrod3_alpha,lwd=2)
+     points(otu_R2_CO2_initial_agg$start_species_richness,otu_R2_CO2_initial_agg$CO2,pch=20,col="goldenrod3")
+     text(250,0.5,expression(r^{2}~"=0.50"))
+     axis(1,c(0,100,200,300))
+     axis(2,c(0,2,4,6))
+     
+     ##pic 4
+     plot(otu_R2_cc_agg$stationary_species_richness,otu_R2_cc_agg$cc,pch=20,col="tomato1",xlim=c(0,60),ylim=c(0,5*10^7),
+          cex.lab=1,cex.axis=1,xlab="",ylab="",xaxt='n',yaxt='n')
+     title(ylab='Max. cell count/mL',line=2)
+     polygon(c(s0_scc, rev(s0_scc)), c(fitted_scc$summary[,5], rev(fitted_scc$summary[,6])),col =bluegrey, border = NA)
+     lines(s0_scc,fitted_scc$summary[,1], lty = 1, col = "grey26",lwd=3)
+     arrows(d_scc$stationary_species_richness,d_scc$cc-d_scc$cc.sd,d_scc$stationary_species_richness,d_scc$cc+d_scc$cc.sd, 
+            length = 0,col=tomato1_alpha,lwd=2)
+     
+     points(otu_R2_cc_agg$stationary_species_richness,otu_R2_cc_agg$cc,pch=20,col="tomato1")
+     text(45,5*10^6,expression(r^{2}~"=0.38"))
+     axis(1,c(0,20,40,60))
+     axis(2,c(0,2*10^7,4*10^7))
+     
+     ##pic 5
+     
+     plot(otu_R2_rf_cc_agg$stationary_species_richness,otu_R2_rf_cc_agg$ratio,pch=20,col="darkcyan",xlim=c(0,60),ylim=c(0,8*10^-5),
+          cex.lab=1,cex.axis=1,xlab="",ylab="",xaxt='n',yaxt='n')
+     title(xlab="Stationary taxonomic richness",ylab="Protein(RFU/cell)",line=2)
+     polygon(c(s0_srf_cc, rev(s0_srf_cc)), c(fitted_srf_cc$summary[,5], rev(fitted_srf_cc$summary[,6])),col = bluegrey, border = NA)
+     lines(s0_srf_cc,fitted_srf_cc$summary[,1], lty = 1, col = "grey26",lwd=3)
+     arrows(d_srf_cc$stationary_species_richness,d_srf_cc$ratio-d_srf_cc$ratio.sd,d_srf_cc$stationary_species_richness,
+            d_srf_cc$ratio+d_srf_cc$ratio.sd, length = 0,col=darkcyan_alpha,lwd=2)
+     points(otu_R2_rf_cc_agg$stationary_species_richness,otu_R2_rf_cc_agg$ratio,pch=20,col="darkcyan")
+      
+     text(45,0.6*10^-5,expression(r^{2}~"=0.16"))
+     axis(1,c(0,20,40,60))
+     axis(2,c(0,4*10^-5,8*10^-5))
+    
+     
+     ##pic 6
+     plot(otu_R2_CO2_agg$stationary_species_richness,otu_R2_CO2_agg$CO2,pch=20,col="goldenrod3",xlim=c(0,60),ylim=c(0,7)
+          ,cex.lab=1,cex.axis=1,xlab="",ylab="",xaxt='n',yaxt='n')
+     #title(xlab="Stationary phase species richness",ylab=expression("CO2 ("~paste(mu,g)~")"),line=2)
+     title(ylab=expression("CO"[2]*"("~paste(mu,g)~")"),line=2)
+     polygon(c(s0_sCO2, rev(s0_sCO2)), c(fitted_sCO2$summary[,5], rev(fitted_sCO2$summary[,6])),col = bluegrey, border = NA)
+     lines(s0_sCO2,fitted_sCO2$summary[,1], lty = 1, col = "grey26",lwd=3)
+     arrows(d_sCO2$stationary_species_richness,d_sCO2$CO2-d_sCO2$CO2.sd,d_sCO2$stationary_species_richness,d_sCO2$CO2+d_sCO2$CO2.sd, 
+            length = 0,col=goldenrod3_alpha,lwd=2)
+     points(otu_R2_CO2_agg$stationary_species_richness,otu_R2_CO2_agg$CO2,pch=20,col="goldenrod3")
+     text(45,0.5,expression(r^{2}~"=0.57"))
+     axis(1,c(0,20,40,60))
+     axis(2,c(0,2,4,6))
+     #dev.off()
+     
+     
+    
+```
+
+#Normalized CO2 and Normalized Cell count compare(Figure 2c)
+```{r}
+
+otu_R2_cc_CO2_agg=merge(otu_R2_cc_agg,otu_R2_CO2_agg,by='Group.1')
+otu_R2_cc_CO2_agg$cc.norm=(otu_R2_cc_CO2_agg$cc-min(otu_R2_cc_CO2_agg$cc))/(max(otu_R2_cc_CO2_agg$cc)-min(otu_R2_cc_CO2_agg$cc))*100
+otu_R2_cc_CO2_agg$CO2.norm=(otu_R2_cc_CO2_agg$CO2-min(otu_R2_cc_CO2_agg$CO2))/(max(otu_R2_cc_CO2_agg$CO2)-min(otu_R2_cc_CO2_agg$CO2))*100
+
+otu_R2_cc_CO2=merge(otu_R2_cc,otu_R2_CO2,by='Row.names')
+otu_R2_cc_CO2$cc.norm=(otu_R2_cc_CO2$cc-min(otu_R2_cc_CO2$cc))/(max(otu_R2_cc_CO2$cc)-min(otu_R2_cc_CO2$cc))*100
+otu_R2_cc_CO2$CO2.norm=(otu_R2_cc_CO2$CO2-min(otu_R2_cc_CO2$CO2))/(max(otu_R2_cc_CO2$CO2)-min(otu_R2_cc_CO2$CO2))*100
+
+#t test for speed of increase for both averaged and non-averaged data
+t.test(otu_R2_cc_CO2_agg$cc,otu_R2_cc_CO2_agg$CO2,paired = T)
+t.test(otu_R2_cc_CO2$cc,otu_R2_cc_CO2$CO2,paired = T)
+
+scc_norm=(max(otu_R2_cc_CO2$cc)-min(otu_R2_cc_CO2$cc))/100
+sCO2_norm=(max(otu_R2_cc_CO2$CO2)-min(otu_R2_cc_CO2$CO2))/100
+
+
+#png('./16S_adjusted_new/fig_paper/normalized_fits_CO2_cc_dots.png',width=1500,height=2000,res=300)
+
+par(mar=c(5, 4, 5, 7),cex=1.2)
+plot(s0_scc,fitted_scc$summary[,1],col="tomato1",xlim=c(0,60),ylim=c(0,120),type='n',xlab="",ylab="",xaxt='n')
+
+darkgoldenrod3.t=adjustcolor('darkgoldenrod3',0.2)
+tomato1.t=adjustcolor('tomato1',0.2)
+points(otu_R2_cc_CO2_agg$stationary_species_richness.x,otu_R2_cc_CO2_agg$cc.norm,pch=20,col=tomato1.t)
+points(otu_R2_cc_CO2_agg$stationary_species_richness.x,otu_R2_cc_CO2_agg$CO2.norm,pch=20,col=darkgoldenrod3.t)
+lines(s0_scc,(fitted_scc$summary[,1]-min(otu_R2_cc_CO2$cc))/scc_norm, lty = 1, col = "tomato1",lwd=3)
+lines(s0_sCO2,(fitted_sCO2$summary[,1]-min(otu_R2_cc_CO2$CO2))/sCO2_norm, lty = 1, col = "darkgoldenrod3",lwd=3)
+
+
+title(xlab='Taxonomic richness',ylab="% Increase in function ",line=2.5,cex.lab=1)
+#legend("topright",inset=c(-0.7,0),x.intersp=0.5,legend=c("Cell Density", expression('CO'[2])),
+#       col=c('tomato1','darkgoldenrod3'),fill=c('tomato1','darkgoldenrod3'),border = NA,bty='n' )
+legend(15,15,legend=c("Cell Density", expression('CO'[2])),
+       col=c('tomato1','darkgoldenrod3'),fill=c('tomato1','darkgoldenrod3'),border = NA,bty='n' )
+axis(1,c(0,20,40,60))
+text(45,118,expression("p<2.2" %*% 10^{-16}),cex=0.8)
+#dev.off()
+
+```
+
+# transform dataset for monocultures
+```{r}
+
+
+t_G_single_16S=as.data.frame(t(otu_G_single_16S))
+t_G_single_16S[t_G_single_16S<0.9]=0
+
+```
+
+#Link community function  to monocultures 
+```{r}
+ 
+#Start with Cell count
+
+
+##merge OTU dataset with productivity (cc) dataset
+
+t_G_single_cc=merge(t_G_single_16S,G_cc_1,by=0)
+rownames(t_G_single_cc)=t_G_single_cc$Row.names
+t_G_single_cc$Row.names=NULL
+
+#This part is to match each single OTU with its productivity
+
+summary_group_isolates_cc=apply(t_G_single_cc[,1:(ncol(t_G_single_cc)-1)],2, 
+                                function(x) t_G_single_cc %>% filter(x>0) %>%dplyr::select(cc) %>% 
+                                  summarize(N=n(),mean = mean(cc),sd = sd(cc),se = sd / sqrt(N)) %>% filter(N>0) )
+
+summary_group_isolates_cc=do.call(rbind, summary_group_isolates_cc)
+summary_group_isolates_cc=summary_group_isolates_cc[order(rownames(summary_group_isolates_cc)),]
+
+##Find constitutable communities by monocultures
+otu_overlap_isolates_cc=merge(otu_R2_scale_16S,summary_group_isolates_cc,by=0)
+rownames(otu_overlap_isolates_cc)=otu_overlap_isolates_cc$Row.names
+otu_overlap_isolates_cc$Row.names=NULL
+
+otu_overlap_R2_isolates_cc=otu_overlap_isolates_cc[,1:ncol(otu_R2_scale_16S)]
+summary_group_isolates_cc_1=otu_overlap_isolates_cc[,(ncol(otu_R2_scale_16S)+1):ncol(otu_overlap_isolates_cc)]
+
+otu_R2_constitute_isolates_cc=otu_overlap_R2_isolates_cc[,colSums(otu_overlap_R2_isolates_cc)>0.85] ##Constitutable communities in R2
+otu_R2_constitute_isolates_cc_1=as.data.frame(scale(otu_R2_constitute_isolates_cc,center=F,scale=colSums(otu_R2_constitute_isolates_cc)))  #rescale to 1 
+
+#Stationary species richness of communities that could be constituted
+
+#total richness
+otu_R2_constitute_isolates_16S_sr_cc=otu_R2_scale_16S[,names(otu_R2_scale_16S) %in% names(otu_R2_constitute_isolates_cc_1)]
+otu_R2_constitute_isolates_16S_sr_cc_sr=as.data.frame(apply(otu_R2_constitute_isolates_16S_sr_cc,2,function(x)sum(x>0)))
+#constitute richness
+otu_R2_constitute_isolates_16S_constitute_cc_sr=as.data.frame(apply(otu_R2_constitute_isolates_cc_1,2,function(x)sum(x>0)))
+
+
+#####Calculate the productivity of each taxa in the R2 communities
+#prepare so that the otu table and the community cell count are in same order and dimensions 
+otu_R2_constitute_isolates_cc_2=otu_R2_constitute_isolates_cc_1[,names(otu_R2_constitute_isolates_cc_1) %in% rownames(R2_cc_1)]
+otu_R2_constitute_isolates_cc_ordered=otu_R2_constitute_isolates_cc_2[,order(names(otu_R2_constitute_isolates_cc_2))]
+prod_isolates_constitute_R2_cc=R2_cc_1[rownames(R2_cc_1) %in% names(otu_R2_constitute_isolates_cc_2),,drop=F]
+prod_isolates_constitute_R2_cc_ordered=prod_isolates_constitute_R2_cc[order(rownames(prod_isolates_constitute_R2_cc)),,drop=F]
+
+#check using identical() that the OTUs in the otu table and the community cell count vector are in same order and dimensions 
+identical(rownames(prod_isolates_constitute_R2_cc_ordered),names(otu_R2_constitute_isolates_cc_ordered))
+
+#productivity matrix of each isolate in community
+prod_matrix_isolates_constitute_R2_cc=as.matrix(otu_R2_constitute_isolates_cc_ordered) %*% diag(prod_isolates_constitute_R2_cc_ordered$cc)
+
+#Finding the observed relative function of species in each community
+rp_otu_R2_isolates_constitute_cc=as.data.frame(prod_matrix_isolates_constitute_R2_cc/summary_group_isolates_cc_1$mean)
+names(rp_otu_R2_isolates_constitute_cc)=names(otu_R2_constitute_isolates_cc_ordered)
+
+#propogate standard deviation from isolate cell count summary
+rp_otu_R2_isolates_constitute_cc_error=as.data.frame(rp_otu_R2_isolates_constitute_cc*
+                            (summary_group_isolates_cc_1$sd/summary_group_isolates_cc_1$mean))  #error matrix for relative function of each OTU 
+names(rp_otu_R2_isolates_constitute_cc_error)=names(otu_R2_constitute_isolates_cc_ordered)
+
+#transform relative function matrix and error matrix
+t_rp_otu_R2_isolates_constitute_cc=as.data.frame(t(rp_otu_R2_isolates_constitute_cc))
+t_rp_otu_R2_isolates_constitute_cc_error=as.data.frame(t(rp_otu_R2_isolates_constitute_cc_error))  
+
+#RTF for each community and error for RTF
+Robserved_cc=as.data.frame(rowSums(t_rp_otu_R2_isolates_constitute_cc))
+Robserved_cc$error=apply(t_rp_otu_R2_isolates_constitute_cc_error,1,function(x) sqrt(sum(x^2,na.rm = T)))
+
+Robserved_cc_sr=merge(otu_R2_constitute_isolates_16S_sr_cc_sr,Robserved_cc,by=0)
+Robserved_cc_sr_constitute=merge(Robserved_cc_sr,otu_R2_constitute_isolates_16S_constitute_cc_sr,
+                             by.x="Row.names",by.y=0)
+names(Robserved_cc_sr_constitute)=c('Row.names','total_sr','Rsum','Rsd','constitute_sr')
+Robserved_cc_sr_constitute$Rsum_N=Robserved_cc_sr_constitute$Rsum/Robserved_cc_sr_constitute$total_sr
+Robserved_cc_sr_constitute$Rsum_N_sd=Robserved_cc_sr_constitute$Rsd/Robserved_cc_sr_constitute$total_sr
+
+```
+#Link community function  to monocultures CO2(0-40h), and total protein production
+```{r}
+
+##merge OTU dataset with productivity (CO2_early_40h) dataset
+
+t_G_single_CO2_early_40h=merge(t_G_single_16S,G_CO2_early_40h_1,by=0)
+rownames(t_G_single_CO2_early_40h)=t_G_single_CO2_early_40h$Row.names
+t_G_single_CO2_early_40h$Row.names=NULL
+
+#This part is to match each single OTU with its productivity
+
+summary_group_isolates_CO2_early_40h=apply(t_G_single_CO2_early_40h[,1:(ncol(t_G_single_CO2_early_40h)-1)],2, 
+                                           function(x) t_G_single_CO2_early_40h %>% filter(x>0) %>%dplyr::select(CO2) %>% 
+                                             summarize(N=n(),mean = mean(CO2),sd = sd(CO2),se = sd / sqrt(N)) %>% filter(N>0) )
+
+summary_group_isolates_CO2_early_40h=do.call(rbind, summary_group_isolates_CO2_early_40h)
+summary_group_isolates_CO2_early_40h=summary_group_isolates_CO2_early_40h[order(rownames(summary_group_isolates_CO2_early_40h)),]
+
+##Find constitutable communities by monocultures
+otu_overlap_isolates_CO2_early_40h=merge(otu_R2_scale_16S,summary_group_isolates_CO2_early_40h,by=0)
+rownames(otu_overlap_isolates_CO2_early_40h)=otu_overlap_isolates_CO2_early_40h$Row.names
+otu_overlap_isolates_CO2_early_40h$Row.names=NULL
+
+otu_overlap_R2_isolates_CO2_early_40h=otu_overlap_isolates_CO2_early_40h[,1:ncol(otu_R2_scale_16S)]
+summary_group_isolates_CO2_early_40h_1=otu_overlap_isolates_CO2_early_40h[,(ncol(otu_R2_scale_16S)+1):ncol(otu_overlap_isolates_CO2_early_40h)]
+
+otu_R2_constitute_isolates_CO2_early_40h=otu_overlap_R2_isolates_CO2_early_40h[,colSums(otu_overlap_R2_isolates_CO2_early_40h)>0.85] ##Constitutable communities in R2
+otu_R2_constitute_isolates_CO2_early_40h_1=as.data.frame(scale(otu_R2_constitute_isolates_CO2_early_40h,center=F,scale=colSums(otu_R2_constitute_isolates_CO2_early_40h)))  #rescale to 1 
+
+#Stationary species richness of communities that could be constituted
+#total richness
+otu_R2_constitute_isolates_16S_sr_CO2_early_40h=otu_R2_scale_16S[,names(otu_R2_scale_16S) %in% names(otu_R2_constitute_isolates_CO2_early_40h_1)]
+otu_R2_constitute_isolates_16S_sr_CO2_early_40h_sr=as.data.frame(apply(otu_R2_constitute_isolates_16S_sr_CO2_early_40h,2,function(x)sum(x>0)))
+#constitute richness
+otu_R2_constitute_isolates_16S_constitute_CO2_early_40h_sr=as.data.frame(apply(otu_R2_constitute_isolates_CO2_early_40h_1,2,function(x)sum(x>0)))
+
+#####Calculate the productivity of each taxa in the R2 communities
+otu_R2_constitute_isolates_CO2_early_40h_2=otu_R2_constitute_isolates_CO2_early_40h_1[,names(otu_R2_constitute_isolates_CO2_early_40h_1) %in% rownames(R2_CO2_early_40h_1)]
+otu_R2_constitute_isolates_CO2_early_40h_ordered=otu_R2_constitute_isolates_CO2_early_40h_2[,order(names(otu_R2_constitute_isolates_CO2_early_40h_2))]
+prod_isolates_constitute_R2_CO2_early_40h=R2_CO2_early_40h_1[rownames(R2_CO2_early_40h_1) %in% names(otu_R2_constitute_isolates_CO2_early_40h_2),,drop=F]
+prod_isolates_constitute_R2_CO2_early_40h_ordered=prod_isolates_constitute_R2_CO2_early_40h[order(rownames(prod_isolates_constitute_R2_CO2_early_40h)),,drop=F]
+
+#note that the OTUs have to be in the same order 
+##check using identical()
+identical(rownames(prod_isolates_constitute_R2_CO2_early_40h_ordered),names(otu_R2_constitute_isolates_CO2_early_40h_ordered))
+
+prod_matrix_isolates_constitute_R2_CO2_early_40h=as.matrix(otu_R2_constitute_isolates_CO2_early_40h_ordered) %*% diag(prod_isolates_constitute_R2_CO2_early_40h_ordered$CO2_early)
+
+
+#Finding the observed relative producitivty of species in each community
+rp_otu_R2_isolates_constitute_CO2_early_40h=as.data.frame(prod_matrix_isolates_constitute_R2_CO2_early_40h/summary_group_isolates_CO2_early_40h_1$mean)
+names(rp_otu_R2_isolates_constitute_CO2_early_40h)=names(otu_R2_constitute_isolates_CO2_early_40h_ordered)
+rp_otu_R2_isolates_constitute_CO2_early_40h_error=as.data.frame(rp_otu_R2_isolates_constitute_CO2_early_40h*                                                        (summary_group_isolates_CO2_early_40h_1$sd/summary_group_isolates_CO2_early_40h_1$mean))  
+names(rp_otu_R2_isolates_constitute_CO2_early_40h_error)=names(otu_R2_constitute_isolates_CO2_early_40h_ordered)
+t_rp_otu_R2_isolates_constitute_CO2_early_40h=as.data.frame(t(rp_otu_R2_isolates_constitute_CO2_early_40h))
+t_rp_otu_R2_isolates_constitute_CO2_early_40h_error=as.data.frame(t(rp_otu_R2_isolates_constitute_CO2_early_40h_error))
+
+Robserved_CO2_early_40h=as.data.frame(rowSums(t_rp_otu_R2_isolates_constitute_CO2_early_40h))
+Robserved_CO2_early_40h$error=apply(t_rp_otu_R2_isolates_constitute_CO2_early_40h_error,1,function(x) sqrt(sum(x^2,na.rm = T)))
+Robserved_CO2_early_40h_sr=merge(otu_R2_constitute_isolates_16S_sr_CO2_early_40h_sr,Robserved_CO2_early_40h,by=0)
+Robserved_CO2_early_40h_sr_constitute=merge(Robserved_CO2_early_40h_sr,otu_R2_constitute_isolates_16S_constitute_CO2_early_40h_sr,
+                                        by.x="Row.names",by.y=0)
+names(Robserved_CO2_early_40h_sr_constitute)=c('Row.names','total_sr','Rsum','Rsd','constitute_sr')
+Robserved_CO2_early_40h_sr_constitute$Rsum_N=Robserved_CO2_early_40h_sr_constitute$Rsum/Robserved_CO2_early_40h_sr_constitute$total_sr
+Robserved_CO2_early_40h_sr_constitute$Rsum_N_sd=Robserved_CO2_early_40h_sr_constitute$Rsd/Robserved_CO2_early_40h_sr_constitute$total_sr
+
+##merge OTU dataset with productivity (total protein) dataset
+
+t_G_single_rf=merge(t_G_single_16S,G_rf_1,by=0)
+rownames(t_G_single_rf)=t_G_single_rf$Row.names
+t_G_single_rf$Row.names=NULL
+
+#This part is to match each single OTU with its productivity
+
+summary_group_isolates_rf=apply(t_G_single_rf[,1:(ncol(t_G_single_rf)-1)],2, 
+                                function(x) t_G_single_rf %>% filter(x>0) %>%dplyr::select(rf) %>% 
+                                  summarize(N=n(),mean = mean(rf),sd = sd(rf),se = sd / sqrt(N)) %>% filter(N>0) )
+
+summary_group_isolates_rf=do.call(rbind, summary_group_isolates_rf)
+summary_group_isolates_rf=summary_group_isolates_rf[order(rownames(summary_group_isolates_rf)),]
+
+##Find constitutable communities by monocultures
+otu_overlap_isolates_rf=merge(otu_R2_scale_16S,summary_group_isolates_rf,by=0)
+rownames(otu_overlap_isolates_rf)=otu_overlap_isolates_rf$Row.names
+otu_overlap_isolates_rf$Row.names=NULL
+
+otu_overlap_R2_isolates_rf=otu_overlap_isolates_rf[,1:ncol(otu_R2_scale_16S)]
+summary_group_isolates_rf_1=otu_overlap_isolates_rf[,(ncol(otu_R2_scale_16S)+1):ncol(otu_overlap_isolates_rf)]
+
+otu_R2_constitute_isolates_rf=otu_overlap_R2_isolates_rf[,colSums(otu_overlap_R2_isolates_rf)>0.85] ##Constitutable communities in R2
+otu_R2_constitute_isolates_rf_1=as.data.frame(scale(otu_R2_constitute_isolates_rf,center=F,scale=colSums(otu_R2_constitute_isolates_rf)))  #rescale to 1 
+
+#Stationary species richness of communities that could be constituted
+#total richness
+otu_R2_constitute_isolates_16S_sr_rf=otu_R2_scale_16S[,names(otu_R2_scale_16S) %in% names(otu_R2_constitute_isolates_rf_1)]
+otu_R2_constitute_isolates_16S_sr_rf_sr=as.data.frame(apply(otu_R2_constitute_isolates_16S_sr_rf,2,function(x)sum(x>0)))
+#constitute richness
+otu_R2_constitute_isolates_16S_constitute_rf_sr=as.data.frame(apply(otu_R2_constitute_isolates_rf_1,2,function(x)sum(x>0)))
+
+#####Calculate the productivity of each taxa in the R2 communities
+otu_R2_constitute_isolates_rf_2=otu_R2_constitute_isolates_rf_1[,names(otu_R2_constitute_isolates_rf_1) %in% rownames(R2_rf_1)]
+otu_R2_constitute_isolates_rf_ordered=otu_R2_constitute_isolates_rf_2[,order(names(otu_R2_constitute_isolates_rf_2))]
+prod_isolates_constitute_R2_rf=R2_rf_1[rownames(R2_rf_1) %in% names(otu_R2_constitute_isolates_rf_2),,drop=F]
+prod_isolates_constitute_R2_rf_ordered=prod_isolates_constitute_R2_rf[order(rownames(prod_isolates_constitute_R2_rf)),,drop=F]
+
+#note that the OTUs have to be in the same order 
+##check using identical()
+identical(rownames(prod_isolates_constitute_R2_rf_ordered),names(otu_R2_constitute_isolates_rf_ordered))
+
+prod_matrix_isolates_constitute_R2_rf=as.matrix(otu_R2_constitute_isolates_rf_ordered) %*% diag(prod_isolates_constitute_R2_rf_ordered$rf)
+
+#Finding the observed relative producitivty of species in each community
+rp_otu_R2_isolates_constitute_rf=as.data.frame(prod_matrix_isolates_constitute_R2_rf/summary_group_isolates_rf_1$mean)
+names(rp_otu_R2_isolates_constitute_rf)=names(otu_R2_constitute_isolates_rf_ordered)
+rp_otu_R2_isolates_constitute_rf_error=as.data.frame(rp_otu_R2_isolates_constitute_rf*
+                                                       (summary_group_isolates_rf_1$sd/summary_group_isolates_rf_1$mean))  
+names(rp_otu_R2_isolates_constitute_rf_error)=names(otu_R2_constitute_isolates_rf_ordered)
+t_rp_otu_R2_isolates_constitute_rf=as.data.frame(t(rp_otu_R2_isolates_constitute_rf))
+t_rp_otu_R2_isolates_constitute_rf_error=as.data.frame(t(rp_otu_R2_isolates_constitute_rf_error))
+
+Robserved_rf=as.data.frame(rowSums(t_rp_otu_R2_isolates_constitute_rf))
+Robserved_rf$error=apply(t_rp_otu_R2_isolates_constitute_rf_error,1,function(x) sqrt(sum(x^2,na.rm = T)))
+Robserved_rf_sr=merge(otu_R2_constitute_isolates_16S_sr_rf_sr,Robserved_rf,by=0)
+Robserved_rf_sr_constitute=merge(Robserved_rf_sr,otu_R2_constitute_isolates_16S_constitute_rf_sr,
+                             by.x="Row.names",by.y=0)
+names(Robserved_rf_sr_constitute)=c('Row.names','total_sr','Rsum','Rsd','constitute_sr')
+Robserved_rf_sr_constitute$Rsum_N=Robserved_rf_sr_constitute$Rsum/Robserved_rf_sr_constitute$total_sr
+Robserved_rf_sr_constitute$Rsum_N_sd=Robserved_rf_sr_constitute$Rsd/Robserved_rf_sr_constitute$total_sr
+
+```
+
+##Merge all three datasets together
+```{r}
+
+Robserved_cc_rf_sr_constitute=merge(Robserved_cc_sr_constitute,Robserved_rf_sr_constitute,by='Row.names')
+Robserved_cc_rf_CO2_early_40h_sr_constitute=merge(Robserved_cc_rf_sr_constitute,Robserved_CO2_early_40h_sr_constitute,by='Row.names')
+Robserved_cc_rf_CO2_early_40h_sr_constitute_order=Robserved_cc_rf_CO2_early_40h_sr_constitute[order(Robserved_cc_rf_CO2_early_40h_sr_constitute$total_sr.x),]
+comp_seq=seq(0,max(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr.x))
+comp_seq_r=1/comp_seq
+
+##Now *.x is cell count, *.y is protein, no .x or .y is CO2_early_40h 
+```
+
+###Relative CUE estimation 
+```{r}
+
+
+Robserved_cc_rf_CO2_early_40h_sr_constitute_order$RTF_ratio=Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum/Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum.y
+CUE=seq(0,0.6,0.01)
+fold=lapply(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$RTF_ratio,function(x) 1/(x*(1-CUE)+CUE))
+TR=lapply(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr.x,function(x) rep(x,length(CUE)))
+fold_TR=as.data.frame(unlist(TR))
+fold_TR$fold=unlist(fold)
+names(fold_TR)[1]='TR'
+fold_TR_agg=aggregate(fold_TR,by=list(fold_TR$TR),mean)
+
+```
+
+#More colors
+```{r}
+tomato1.t1=adjustcolor('tomato1',0.5)
+tomato1.t=adjustcolor('tomato1',0.3)
+darkcyan.t1=adjustcolor('darkcyan',0.5)
+darkcyan.t=adjustcolor('darkcyan',0.3)
+darkgoldenrod3.t1=adjustcolor('darkgoldenrod3',0.5)
+darkgoldenrod3.t=adjustcolor('darkgoldenrod3',0.3)
+slategrey.t=adjustcolor('slategrey',0.6)
+```
+
+
+```{r}
+#png("./16S_adjusted_new/fig_paper/Robserved_diversity_all_Fig3_combined_22_final.png",width=3000,height=2000,res=300)
+par(mfcol=c(2,2),cex=1.2)
+
+par(mar=c(3, 4, 0, 2), xpd=TRUE)
+
+##Figure 3a
+#png("./16S_adjusted_new/fig_paper/Robserved_diversity_Figure_3a_new_log.png",width=2000,height=1200,res=300)
+plot(Robserved_cc_rf_CO2_early_40h_sr_constitute$total_sr.x,Robserved_cc_rf_CO2_early_40h_sr_constitute$Rsum.x,col=tomato1.t1,
+     pch=20,yaxt='n',xlab='',ylab='',xlim=c(0,56),ylim=c(0.01,100),log='y')   #log ylim=c(0.01,100)
+polygon(c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr.x, rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr.x)), 
+        c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum.x-Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsd.x,
+          rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum.x+Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsd.x)),col=tomato1.t,border = tomato1.t1)
+points(Robserved_cc_rf_CO2_early_40h_sr_constitute$total_sr.y,Robserved_cc_rf_CO2_early_40h_sr_constitute$Rsum.y,col=darkcyan.t1,pch=20)
+
+polygon(c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr.y, rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr.y)), 
+        c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum.y-Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsd.y,
+          rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum.y+Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsd.y)), col=darkcyan.t,border = darkcyan.t1)
+points(Robserved_cc_rf_CO2_early_40h_sr_constitute$total_sr,Robserved_cc_rf_CO2_early_40h_sr_constitute$Rsum,col=darkgoldenrod3.t1,pch=20)
+
+polygon(c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr, rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr)), 
+        c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum-Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsd,
+          rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum+Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsd)), col=darkgoldenrod3.t,border = darkgoldenrod3.t1)
+axis(2, at=c(0.1,1,10))
+#axis(2, at=c(0,2,4,6,8,10))
+
+polygon(c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr, rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr)), 
+        c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum-Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsd,
+          rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum.y+Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsd.y)),col = slategrey.t, border = NA)
+
+title(ylab=expression('RTF'[C]),xlab='Taxonomic Richness',line=2,cex.lab=1.5)
+#title(ylab=expression('RTF'[C]),line=2)
+abline(v=12,lty=2,col='slategrey')
+abline(v=26,lty=2,col='slategrey')
+
+par(xpd=F)
+abline(h=1,lty=2)
+lines(comp_seq, comp_seq,lty=2,col='red')
+#dev.off()
+
+#Figure 3b
+par(mar=c(3, 4, 0, 2), xpd=TRUE)
+#png("./16S_adjusted_new/fig_paper/Robserved_diversity_N_Figure_3b_new_log.png",width=1500,height=2000,res=300)
+plot(Robserved_cc_rf_CO2_early_40h_sr_constitute$total_sr.x,Robserved_cc_rf_CO2_early_40h_sr_constitute$Rsum_N.x,col=tomato1.t1,
+     pch=20,yaxt='n',xlab='',ylab='',xlim=c(0,56),ylim=c(0.008,1.2), log='y')  #log ylim=c(0.008,1.2)
+polygon(c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr.x, rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr.x)), 
+        c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N.x-Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N_sd.x,
+          rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N.x+Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N_sd.x)),col = tomato1.t, border = tomato1.t1)
+
+
+points(Robserved_cc_rf_CO2_early_40h_sr_constitute$total_sr.y,Robserved_cc_rf_CO2_early_40h_sr_constitute$Rsum_N.y,col=darkcyan.t1,pch=20)
+polygon(c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr.y, rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr.y)), 
+        c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N.y-Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N_sd.y,
+          rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N.y+Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N_sd.y)),col = darkcyan.t, border = darkcyan.t1)
+
+
+points(Robserved_cc_rf_CO2_early_40h_sr_constitute$total_sr,Robserved_cc_rf_CO2_early_40h_sr_constitute$Rsum_N,col=darkgoldenrod3.t1,pch=20)
+polygon(c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr, rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr)), 
+        c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N-Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N_sd,
+          rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N+Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N_sd)),col = darkgoldenrod3.t, border = darkgoldenrod3.t1)
+axis(2, at=c(0.01,0.1,1))
+#axis(2, at=c(0,0.5,1))
+polygon(c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr, rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$total_sr)), 
+        c(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N-Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N_sd,
+          rev(Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N.y+Robserved_cc_rf_CO2_early_40h_sr_constitute_order$Rsum_N_sd.y)),col = slategrey.t, border = NA)
+#title(ylab=expression('RTF'[C]/N),line=2)
+title(ylab=expression('RTF'[C]/N),xlab='Taxonomic Richness',line=2.5,cex.lab=1.5)
+
+
+par(xpd=F)
+abline(h=1,lty=2,col='red')
+lines(comp_seq, comp_seq_r,lty=2)
+abline(v=12,lty=2,col='slategrey')
+abline(v=26,lty=2,col='slategrey')
+#dev.off()
+
+##Figure 3c
+
+par(mar=c(3, 4, 0, 2), xpd=TRUE)
+#png("./16S_adjusted_new/fig_paper/Robserved_diversity_Figure_3c_CUE_log.png",width=1500,height=2000,res=300)
+plot(jitter(unlist(TR),2),unlist(fold),xlab='',ylab='',pch=20,col=alpha('darkslategray4',0.3),xlim=c(0,56),ylim=c(0.05,5),
+     yaxt='n',log='y')  #log ylim=c(0.05,5)
+lines(fold_TR_agg$TR,fold_TR_agg$fold,lwd=2)
+abline(v=12,lty=2,col='slategrey')
+abline(v=26,lty=2,col='slategrey')
+par(xpd=F)
+abline(h=1,lty=2,col='red')
+axis(2, at=c(0.1,1,4))
+#axis(2, at=c(0,1,2,3,4))
+title(ylab='Relative CUE',xlab='Taxonomic Richness',line=2.5,cex.lab=1.5)
+#dev.off()
+
+
+##Figure 3d
+par(mar=c(3, 4, 0, 2),xpd=F)
+#png("./16S_adjusted_new/fig_paper/Robserved_diversity_Figure_3d.png",width=1500,height=2000,res=300)
+species_richness=seq(1,56,0.25)
+b4=1/(1+exp(-(species_richness-16.5)/1.9))    #logistic growth
+b6=0.5/(1+exp(-(species_richness-16.5)/2.8))
+plot(species_richness,b4,ylab = 'Strength of Effect',xlab='Taxonomic Richness',type="l",col='red',xlim=c(0,56),yaxt='n',ylim=c(0,1.2),lwd=2,cex.lab=1.5)
+lines(species_richness,b6,col='blue3',lwd=2)
+
+
+abline(v=12,lty=2,col='slategrey')
+abline(v=26,lty=2,col='slategrey')
+axis(2, at=c(0,0.5,1))
+
+#dev.off()
+
+```
+#Statistical tests related to figure 3c
+```{r}
+
+
+Robserved_cc_rf_CO2_early_40h_sr_constitute_order_high_div=Robserved_cc_rf_CO2_early_40h_sr_constitute_order %>%
+  dplyr::select(total_sr.x,Rsum.x,Rsd.x,Rsum.y,Rsd.y,Rsum, Rsd) %>%
+  filter(total_sr.x>26)
+
+t.test(Robserved_cc_rf_CO2_early_40h_sr_constitute_order_high_div$Rsum,mu=1)
+t.test(Robserved_cc_rf_CO2_early_40h_sr_constitute_order_high_div$Rsum.x,mu=1)
+t.test(Robserved_cc_rf_CO2_early_40h_sr_constitute_order_high_div$Rsum.y,mu=1)
+
+wilcox.test(Robserved_cc_rf_CO2_early_40h_sr_constitute_order_high_div$Rsum.x,Robserved_cc_rf_CO2_early_40h_sr_constitute_order_high_div$Rsum.y,
+            paired=T,alternative = 'greater')
+
+Robserved_cc_rf_CO2_early_40h_sr_constitute_order_mid_div=Robserved_cc_rf_CO2_early_40h_sr_constitute_order %>%
+  dplyr::select(total_sr.x,Rsum.x,Rsd.x,Rsum.y,Rsd.y,Rsum, Rsd) %>%
+  filter(total_sr.x<=26 & total_sr.x>12 )
+t.test(Robserved_cc_rf_CO2_early_40h_sr_constitute_order_mid_div$Rsum,mu=1)
+t.test(Robserved_cc_rf_CO2_early_40h_sr_constitute_order_mid_div$Rsum.x,mu=1)
+t.test(Robserved_cc_rf_CO2_early_40h_sr_constitute_order_mid_div$Rsum.y,mu=1)
+
+
+
+Robserved_cc_rf_CO2_early_40h_sr_constitute_order_low_div=Robserved_cc_rf_CO2_early_40h_sr_constitute_order %>%
+  dplyr::select(total_sr.x,Rsum.x,Rsd.x,Rsum.y,Rsd.y,Rsum, Rsd) %>%
+  filter(total_sr.x<=12)
+t.test(Robserved_cc_rf_CO2_early_40h_sr_constitute_order_low_div$Rsum,mu=1)
+t.test(Robserved_cc_rf_CO2_early_40h_sr_constitute_order_low_div$Rsum.x,mu=1)
+t.test(Robserved_cc_rf_CO2_early_40h_sr_constitute_order_low_div$Rsum.y,mu=1)
+
+
+
+```
+
+#This part now turns to analyzing growth curves of all communties to see if communities with different diversity have different growth rates
+```{r}
+
+
+##add X to rownames of growth curve data for data selection
+rownames(R2_cc_all_times)=paste("X",rownames(R2_cc_all_times),sep="")
+rownames(time_points)=paste("X",rownames(time_points),sep="")
+
+#only select curves that have OTU measurements
+R2_cc_all_times_1=R2_cc_all_times[rownames(R2_cc_all_times) %in% names(otu_R2_16S),]
+time_points_1=time_points[rownames(time_points) %in% names(otu_R2_16S),]
+
+
+max_index=as.data.frame(apply(R2_cc_all_times_1[,1:7],1,function(x) which.max(x)))
+max_index_sr=merge(Robserved_cc_rf_CO2_early_40h_sr_constitute[,1:2],max_index,by.x ='Row.names',by.y=0 )
+names(max_index_sr)[2:3]=c("sr",'peak_time')
+max_index_sr$peak_time=gsubfn(".", list("2" = "16h", "3" = "24h","4"="32h","5"="40h","6"="64h","7"="110h"), as.character(max_index_sr$peak_time))
+max_index_sr$peak_time=as.factor(max_index_sr$peak_time)
+max_index_sr$peak_time = factor(max_index_sr$peak_time,c("16h","24h","32h","40h","110h"))
+
+max_index_sr$sr_group[max_index_sr$sr<=26] = "<=26"
+max_index_sr$sr_group[max_index_sr$sr>26] = ">26"
+
+max_index_sr_large=max_index_sr[max_index_sr$sr>26,]
+max_index_sr_small=max_index_sr[max_index_sr$sr<=26,]
+
+
+max_index_sr_large_agg=aggregate(. ~ peak_time, data =max_index_sr_large, length)
+max_index_sr_large_agg$Row.names=NULL
+names(max_index_sr_large_agg)[2]="counts"
+max_index_sr_large_agg[5,1]='110h'
+max_index_sr_large_agg[5,2]=0
+max_index_sr_large_agg[4,1]='16h'
+max_index_sr_large_agg[4,2]=0
+
+
+max_index_sr_small_agg=aggregate(. ~ peak_time, data =max_index_sr_small, length)
+max_index_sr_small_agg$Row.names=NULL
+names(max_index_sr_small_agg)[2]="counts"
+
+#png("./16S_adjusted_new/fig_paper/R2_peak_cc_sr_large_final_new_5t.png",width = 1200,height=800,res=300)
+barchart(counts ~ peak_time, max_index_sr_large_agg,ylab='No. of communities',xlab="Time to peak cell density",col='grey',scale = list(tck = c(1,0)),ylim=c(0,25),axis.cex=1)
+#dev.off()
+#png("./16S_adjusted_new/fig_paper/R2_peak_cc_sr_small_final_new_5t.png",width = 1200,height=800,res=300)
+barchart(counts ~ peak_time, max_index_sr_small_agg,ylab='No. of communities',col='grey',xlab="Time to peak cell density",scale = list(tck = c(1,0)),ylim=c(0,25),cex.axis=1)
+#dev.off()
+
+```
+#AIC and R2 calculations for MPD and MNPD   
+##This data is in Table S2
+```{r,warning=FALSE}
+
+
+R2_NTI_9_taxa=read.csv("R2_NTI_9_taxa_new.csv",row.names = 1)
+R2_NRI_9_taxa=read.csv("R2_NRI_9_taxa_new.csv",row.names = 1)
+
+##########CO2#############################
+R2_NTI_9_taxa_CO2=merge(R2_NTI_9_taxa,R2_CO2_1,by=0)
+R2_NRI_9_taxa_CO2=merge(R2_NRI_9_taxa,R2_CO2_1,by=0)
+
+#Merge biologcial replicates
+R2_NRI_9_taxa_CO2$initial=substr(R2_NRI_9_taxa_CO2$Row.names,1,5)
+R2_NRI_9_taxa_CO2_agg=aggregate(R2_NRI_9_taxa_CO2[,1:ncol(R2_NRI_9_taxa_CO2)-1],by=list(R2_NRI_9_taxa_CO2$initial),mean)
+
+R2_NTI_9_taxa_CO2$initial=substr(R2_NTI_9_taxa_CO2$Row.names,1,5)
+R2_NTI_9_taxa_CO2_agg=aggregate(R2_NTI_9_taxa_CO2[,1:ncol(R2_NTI_9_taxa_CO2)-1],by=list(R2_NTI_9_taxa_CO2$initial),mean)
+
+##nls
+m_CO2_mpd=nls(CO2~a*(mpd.obs)/(b+mpd.obs),start=list(a=5,b=1),data=R2_NRI_9_taxa_CO2_agg,trace=T)
+m1_CO2_mpd=nls(CO2~a*mpd.obs+b,start=list(a=5,b=1),data=R2_NRI_9_taxa_CO2_agg,trace=T)
+m2_CO2_mpd=nls(CO2~a*log(mpd.obs)+b,start=list(a=5,b=1),data=R2_NRI_9_taxa_CO2_agg,trace=T)
+
+
+
+AIC(m_CO2_mpd)
+AIC(m1_CO2_mpd)
+AIC(m2_CO2_mpd)
+
+TSS <- sum((R2_NRI_9_taxa_CO2_agg$CO2 - mean(R2_NRI_9_taxa_CO2_agg$CO2))^2)
+m.RSS.p.mpd <- sum(residuals(m_CO2_mpd)^2)
+m1.RSS.p.mpd  <- sum(residuals(m1_CO2_mpd)^2)
+m2.RSS.p.mpd  <- sum(residuals(m2_CO2_mpd)^2)
+
+m.R2.mpd =1-m.RSS.p.mpd /TSS 
+m1.R2.mpd =1-m1.RSS.p.mpd /TSS 
+m2.R2.mpd =1-m2.RSS.p.mpd /TSS 
+
+m.R2.mpd 
+m1.R2.mpd 
+m2.R2.mpd 
+
+m_CO2_mntd=nls(CO2~a*(mntd.obs)/mntd.obs,start=list(a=1),data=R2_NTI_9_taxa_CO2_agg,trace=T)
+m1_CO2_mntd=nls(CO2~a*mntd.obs+b,start=list(a=1,b=0),data=R2_NTI_9_taxa_CO2_agg,trace=T)
+m2_CO2_mntd=nls(CO2~a*log(mntd.obs)+b,start=list(a=1,b=0),data=R2_NTI_9_taxa_CO2_agg,trace=T)
+
+AIC(m_CO2_mntd)
+AIC(m1_CO2_mntd)
+AIC(m2_CO2_mntd)
+
+TSS <- sum((R2_NTI_9_taxa_CO2_agg$CO2 - mean(R2_NTI_9_taxa_CO2_agg$CO2))^2)
+m.RSS.p.mntd <- sum(residuals(m_CO2_mntd)^2)
+m1.RSS.p.mntd <- sum(residuals(m1_CO2_mntd)^2)
+m2.RSS.p.mntd <- sum(residuals(m2_CO2_mntd)^2)
+
+m.R2.mntd=1-m.RSS.p.mntd/TSS 
+m1.R2.mntd=1-m1.RSS.p.mntd/TSS 
+m2.R2.mntd=1-m2.RSS.p.mntd/TSS 
+
+m.R2.mntd
+m1.R2.mntd
+m2.R2.mntd
+
+
+##########cc#############################
+R2_NTI_9_taxa_cc=merge(R2_NTI_9_taxa,R2_cc_1,by=0)
+R2_NRI_9_taxa_cc=merge(R2_NRI_9_taxa,R2_cc_1,by=0)
+
+#Merge biologcial replicates
+R2_NRI_9_taxa_cc$initial=substr(R2_NRI_9_taxa_cc$Row.names,1,5)
+R2_NRI_9_taxa_cc_agg=aggregate(R2_NRI_9_taxa_cc[,1:ncol(R2_NRI_9_taxa_cc)-1],by=list(R2_NRI_9_taxa_cc$initial),mean)
+
+R2_NTI_9_taxa_cc$initial=substr(R2_NTI_9_taxa_cc$Row.names,1,5)
+R2_NTI_9_taxa_cc_agg=aggregate(R2_NTI_9_taxa_cc[,1:ncol(R2_NTI_9_taxa_cc)-1],by=list(R2_NTI_9_taxa_cc$initial),mean)
+
+##nls
+m_cc_mpd=nls(cc~a*(mpd.obs)/(b+mpd.obs),start=list(a=3*10^7,b=1),data=R2_NRI_9_taxa_cc_agg,trace=T)
+m1_cc_mpd=nls(cc~a*mpd.obs+b,start=list(a=3*10^7,b=1),data=R2_NRI_9_taxa_cc_agg,trace=T)
+m2_cc_mpd=nls(cc~a*log(mpd.obs)+b,start=list(a=3*10^7,b=1),data=R2_NRI_9_taxa_cc_agg,trace=T)
+
+AIC(m_cc_mpd)
+AIC(m1_cc_mpd)
+AIC(m2_cc_mpd)
+
+TSS <- sum((R2_NRI_9_taxa_cc_agg$cc - mean(R2_NRI_9_taxa_cc_agg$cc))^2)
+m.RSS.p.mpd <- sum(residuals(m_cc_mpd)^2)
+m1.RSS.p.mpd  <- sum(residuals(m1_cc_mpd)^2)
+m2.RSS.p.mpd  <- sum(residuals(m2_cc_mpd)^2)
+
+m.R2.mpd =1-m.RSS.p.mpd /TSS 
+m1.R2.mpd =1-m1.RSS.p.mpd /TSS 
+m2.R2.mpd =1-m2.RSS.p.mpd /TSS 
+
+m.R2.mpd 
+m1.R2.mpd 
+m2.R2.mpd 
+
+m_cc_mntd=nls(cc~a*(mntd.obs)/(mntd.obs+b),start=list(a=3*10^7,b=0),data=R2_NTI_9_taxa_cc_agg,trace=T)
+m1_cc_mntd=nls(cc~a*mntd.obs+b,start=list(a=3*10^7,b=0),data=R2_NTI_9_taxa_cc_agg,trace=T)
+m2_cc_mntd=nls(cc~a*log(mntd.obs)+b,start=list(a=3*10^7,b=0),data=R2_NTI_9_taxa_cc_agg,trace=T)
+
+AIC(m_cc_mntd)
+AIC(m1_cc_mntd)
+AIC(m2_cc_mntd)
+
+TSS <- sum((R2_NTI_9_taxa_cc_agg$cc - mean(R2_NTI_9_taxa_cc_agg$cc))^2)
+m.RSS.p.mntd <- sum(residuals(m_cc_mntd)^2)
+m1.RSS.p.mntd <- sum(residuals(m1_cc_mntd)^2)
+m2.RSS.p.mntd <- sum(residuals(m2_cc_mntd)^2)
+
+m.R2.mntd=1-m.RSS.p.mntd/TSS 
+m1.R2.mntd=1-m1.RSS.p.mntd/TSS 
+m2.R2.mntd=1-m2.RSS.p.mntd/TSS 
+
+m.R2.mntd
+m1.R2.mntd
+m2.R2.mntd
+
+
+##########rf_cc#############################
+R2_NTI_9_taxa_rf_cc=merge(R2_NTI_9_taxa,R2_rf_cc_1,by.x=0,by.y='Row.names')
+R2_NRI_9_taxa_rf_cc=merge(R2_NRI_9_taxa,R2_rf_cc_1,by.x=0,by.y='Row.names')
+
+#Merge biologcial replicates
+R2_NRI_9_taxa_rf_cc$initial=substr(R2_NRI_9_taxa_rf_cc$Row.names,1,5)
+R2_NRI_9_taxa_rf_cc_agg=aggregate(R2_NRI_9_taxa_rf_cc[,1:ncol(R2_NRI_9_taxa_rf_cc)-1],by=list(R2_NRI_9_taxa_rf_cc$initial),mean)
+
+R2_NTI_9_taxa_rf_cc$initial=substr(R2_NTI_9_taxa_rf_cc$Row.names,1,5)
+R2_NTI_9_taxa_rf_cc_agg=aggregate(R2_NTI_9_taxa_rf_cc[,1:ncol(R2_NTI_9_taxa_rf_cc)-1],by=list(R2_NTI_9_taxa_rf_cc$initial),mean)
+
+##nls
+m_rf_cc_mpd=nls(ratio~a*(mpd.obs)/(b+mpd.obs),start=list(a=-3*10^-5,b=0),data=R2_NRI_9_taxa_rf_cc_agg,trace=T)
+m1_rf_cc_mpd=nls(ratio~a*mpd.obs+b,start=list(a=-3*10^-5,b=0),data=R2_NRI_9_taxa_rf_cc_agg,trace=T)
+m2_rf_cc_mpd=nls(ratio~a*log(mpd.obs)+b,start=list(a=-3*10^-5,b=0),data=R2_NRI_9_taxa_rf_cc_agg,trace=T)
+
+AIC(m_rf_cc_mpd)
+AIC(m1_rf_cc_mpd)
+AIC(m2_rf_cc_mpd)
+
+TSS <- sum((R2_NRI_9_taxa_rf_cc_agg$ratio - mean(R2_NRI_9_taxa_rf_cc_agg$ratio))^2)
+m.RSS.p.mpd <- sum(residuals(m_rf_cc_mpd)^2)
+m1.RSS.p.mpd  <- sum(residuals(m1_rf_cc_mpd)^2)
+m2.RSS.p.mpd  <- sum(residuals(m2_rf_cc_mpd)^2)
+
+m.R2.mpd =1-m.RSS.p.mpd /TSS 
+m1.R2.mpd =1-m1.RSS.p.mpd /TSS 
+m2.R2.mpd =1-m2.RSS.p.mpd /TSS 
+
+m.R2.mpd 
+m1.R2.mpd 
+m2.R2.mpd 
+
+m_rf_cc_mntd=nls(ratio~a*(mntd.obs)/(mntd.obs+b),start=list(a=-3*10^-5,b=0),data=R2_NTI_9_taxa_rf_cc_agg,trace=T)
+m1_rf_cc_mntd=nls(ratio~a*mntd.obs+b,start=list(a=-3*10^-5,b=0),data=R2_NTI_9_taxa_rf_cc_agg,trace=T)
+m2_rf_cc_mntd=nls(ratio~a*log(mntd.obs)+b,start=list(a=-3*10^-5,b=0),data=R2_NTI_9_taxa_rf_cc_agg,trace=T)
+
+AIC(m_rf_cc_mntd)
+AIC(m1_rf_cc_mntd)
+AIC(m2_rf_cc_mntd)
+
+TSS <- sum((R2_NTI_9_taxa_rf_cc_agg$ratio- mean(R2_NTI_9_taxa_rf_cc_agg$ratio))^2)
+m.RSS.p.mntd <- sum(residuals(m_rf_cc_mntd)^2)
+m1.RSS.p.mntd <- sum(residuals(m1_rf_cc_mntd)^2)
+m2.RSS.p.mntd <- sum(residuals(m2_rf_cc_mntd)^2)
+
+m.R2.mntd=1-m.RSS.p.mntd/TSS 
+m1.R2.mntd=1-m1.RSS.p.mntd/TSS 
+m2.R2.mntd=1-m2.RSS.p.mntd/TSS 
+
+m.R2.mntd
+m1.R2.mntd
+m2.R2.mntd
+
+
+```
+
+##Figure S1
+```{r}
+
+
+#These are diversity estimates generated from the breakaway package
+swe_fr_16S=list.load('swe_fr_16S.rds')  #Inoculum
+R2_fr_16S=list.load('R2_fr_16S.rds')  #stationary
+G_fr_16S=list.load('G_fr_16S.rds')  #Simple
+
+##This part is basically sorting the output from breakaway into matrix form that is easy for plotting
+otu_swe_16S_sr_fr_est=as.data.frame(matrix(,nrow=ncol(otu_swe_16S),ncol=7))
+rownames(otu_swe_16S_sr_fr_est) = names(otu_swe_16S)
+otu_R2_16S_sr_fr_est=as.data.frame(matrix(,nrow=ncol(otu_R2_16S),ncol=7))
+rownames(otu_R2_16S_sr_fr_est) = names(otu_R2_16S)
+otu_G_16S_sr_fr_est=as.data.frame(matrix(,nrow=ncol(otu_G_16S),ncol=7))
+rownames(otu_G_16S_sr_fr_est) = names(otu_G_16S)
+
+for (i in 1:nrow(otu_swe_16S_sr_fr_est)){
+  if (as.character(swe_fr_16S[[i]])[1]!=0){
+    #if (swe_fr_16S[[i]]$name!='WLRM'){
+      
+        otu_swe_16S_sr_fr_est$V1[i]= swe_fr_16S[[i]]$est
+        otu_swe_16S_sr_fr_est$V2[i]=swe_fr_16S[[i]]$est-swe_fr_16S[[i]]$seest
+        otu_swe_16S_sr_fr_est$V3[i]=swe_fr_16S[[i]]$est+swe_fr_16S[[i]]$seest
+        otu_swe_16S_sr_fr_est$V4[i]=swe_fr_16S[[i]]$ci[1]
+        otu_swe_16S_sr_fr_est$V5[i]=swe_fr_16S[[i]]$ci[2]
+        otu_swe_16S_sr_fr_est$V6[i]=swe_fr_16S[[i]]$seest}}
+
+otu_swe_16S_sr_fr_est$V7=apply(otu_swe_16S,2,function(x)sum(x>0))
+
+otu_swe_16S_sr_fr_est_noSW=otu_swe_16S_sr_fr_est[-grep('SW',rownames(otu_swe_16S_sr_fr_est)),]
+otu_swe_16S_sr_fr_est_noSW=na.omit(otu_swe_16S_sr_fr_est_noSW)
+otu_swe_16S_sr_fr_est_noSW_sorted=otu_swe_16S_sr_fr_est_noSW[order(otu_swe_16S_sr_fr_est_noSW$V7),]
+
+for (i in 1:nrow(otu_R2_16S_sr_fr_est)){
+  if (as.character(R2_fr_16S[[i]])[1]!=0){
+    #if (R2_fr_16S[[i]]$name!='WLRM'){
+    
+    otu_R2_16S_sr_fr_est$V1[i]= R2_fr_16S[[i]]$est
+    otu_R2_16S_sr_fr_est$V2[i]=R2_fr_16S[[i]]$est-R2_fr_16S[[i]]$seest
+    otu_R2_16S_sr_fr_est$V3[i]=R2_fr_16S[[i]]$est+R2_fr_16S[[i]]$seest
+    otu_R2_16S_sr_fr_est$V4[i]=R2_fr_16S[[i]]$ci[1]
+    otu_R2_16S_sr_fr_est$V5[i]=R2_fr_16S[[i]]$ci[2]
+    otu_R2_16S_sr_fr_est$V6[i]=R2_fr_16S[[i]]$seest}}
+
+otu_R2_16S_sr_fr_est$V7=apply(otu_R2_16S,2,function(x)sum(x>0))
+
+otu_R2_16S_sr_fr_est=na.omit(otu_R2_16S_sr_fr_est)
+
+for (i in 1:nrow(otu_G_16S_sr_fr_est)){
+  if (as.character(G_fr_16S[[i]])[1]!=0){
+    #if (G_fr_16S[[i]]$name!='WLRM'){
+    
+    otu_G_16S_sr_fr_est$V1[i]= G_fr_16S[[i]]$est
+    otu_G_16S_sr_fr_est$V2[i]=G_fr_16S[[i]]$est-G_fr_16S[[i]]$seest
+    otu_G_16S_sr_fr_est$V3[i]=G_fr_16S[[i]]$est+G_fr_16S[[i]]$seest
+    otu_G_16S_sr_fr_est$V4[i]=G_fr_16S[[i]]$ci[1]
+    otu_G_16S_sr_fr_est$V5[i]=G_fr_16S[[i]]$ci[2]
+    otu_G_16S_sr_fr_est$V6[i]=G_fr_16S[[i]]$seest}}
+
+otu_G_16S_sr_fr_est$V7=apply(otu_G_16S,2,function(x)sum(x>0))
+
+otu_G_16S_sr_fr_est=na.omit(otu_G_16S_sr_fr_est)
+
+plot(otu_swe_16S_sr_fr_est_noSW_sorted$V7,otu_swe_16S_sr_fr_est_noSW_sorted$V1,xlim=c(0,500),ylim=c(0,500),pch=16,col='coral',xlab='',ylab='',cex.lab=1.5)
+
+arrows(otu_swe_16S_sr_fr_est_noSW$V7,otu_swe_16S_sr_fr_est_noSW$V2,
+       otu_swe_16S_sr_fr_est_noSW$V7,otu_swe_16S_sr_fr_est_noSW$V3,col='grey80',length = 0)
+arrows(otu_R2_16S_sr_fr_est$V7,otu_R2_16S_sr_fr_est$V2,
+       otu_R2_16S_sr_fr_est$V7,otu_R2_16S_sr_fr_est$V3,col='grey80',length = 0)
+arrows(otu_G_16S_sr_fr_est$V7,otu_G_16S_sr_fr_est$V2,
+       otu_G_16S_sr_fr_est$V7,otu_G_16S_sr_fr_est$V3,col='grey80',length = 0)
+
+points(otu_swe_16S_sr_fr_est_noSW$V7,otu_swe_16S_sr_fr_est_noSW$V1,col='coral',pch=16)
+points(otu_R2_16S_sr_fr_est$V7,otu_R2_16S_sr_fr_est$V1,col='dodgerblue',pch=16)
+points(otu_G_16S_sr_fr_est$V7,otu_G_16S_sr_fr_est$V1,col='seagreen',pch=16)
+
+title(xlab='No. of ASVs',ylab='Estimated taxonomic richness',cex.lab=1,cex.axis=1,line=2.5)
+legend(550,520, legend=c("Inoculum", "Stationary",'Simple'),
+       col=c("coral", "dodgerblue",'seagreen'), pch = 16)
+par(xpd=F)
+ablineclip(0,1,y1=-10,y2=510,lty=2)
+
+
+
+
+
+
+```
+
+#Figure S2 a,b,c
+```{r, message=F,warning=F}
+
+
+##Transform otu_swe_16S for using vegan
+otu_swe_16S_2=as.data.frame(t(otu_swe_16S))   
+
+
+##Taxonomic richness
+
+div_swe=matrix(,nrow=nrow(otu_swe_16S_2))
+div_swe[,1]=apply(otu_swe_16S_2,1,function(x)sum(x>0))
+div_swe=as.data.frame(div_swe)
+div_swe[,2]=as.factor((as.numeric(substr(rownames(otu_swe_16S_2),2,3))))
+
+names(div_swe)=c('sr','DL')
+rownames(div_swe)=substr(rownames(otu_swe_16S_2),2,length(rownames(otu_swe_16S_2)))
+
+
+##2a Inoculum cell count vs. Taxonomic richness 
+
+#Read in cell density at all times for regrowth in seawater
+
+t_0h_summary=read.csv("./swe_cc/t_0h_summary.csv",row.names = 1)
+t_15h_summary=read.csv("./swe_cc/t_15h_summary.csv",row.names = 1)
+t_24h_summary=read.csv("./swe_cc/t_24h_summary.csv",row.names = 1)
+t_38h_summary=read.csv("./swe_cc/t_38h_summary.csv",row.names = 1)
+t_52h_summary=read.csv("./swe_cc/t_52h_summary.csv",row.names = 1)
+t_72h_summary=read.csv("./swe_cc/t_72h_summary.csv",row.names = 1)
+t_96h_summary=read.csv("./swe_cc/t_96h_summary.csv",row.names = 1)
+t_120h_summary=read.csv("./swe_cc/t_120h_summary.csv",row.names = 1)
+
+##This part extracts the last time point for each sample and its cell density
+t_0h_15h_summary=merge(t_0h_summary,t_15h_summary,by=0,all=T)
+
+t_all_times=Reduce(function(x, y) merge(x, y, by.x='Row.names',by.y=0,all=TRUE), 
+                   list(t_0h_15h_summary, t_24h_summary,t_38h_summary,t_52h_summary,t_72h_summary,t_96h_summary,t_120h_summary))
+
+t_all_times=t_all_times[,-grep('time',names(t_all_times))]
+
+ind <- !is.na(t_all_times) 
+t_cc_stop=as.data.frame(tapply(t_all_times[ind], row(t_all_times)[ind], tail, 1) )
+rownames(t_cc_stop)=t_all_times$Row.names
+names(t_cc_stop)='stop_cc'
+
+#merge with taxonomic richness
+div_swe_cc_stop=merge(div_swe,t_cc_stop,by=0)
+
+plot(div_swe_cc_stop$sr,as.numeric(div_swe_cc_stop$stop_cc),pch=16,col='coral',ylim=c(100,8*10^5),log='y',xlab='Taxonomic Richness',ylab='Cell count/mL(end of regrowth)')
+
+
+#2b Species richness vs. dilution
+
+plot(div_swe$DL,div_swe$sr,outline=F,xlab='',ylab='',xaxt='n')
+stripchart(sr~DL,data=div_swe,vertical=T,
+           pch = 20,col=alpha('coral',alpha=0.3),method="jitter",
+           add = TRUE)
+
+title(xlab='log4(dilution fold)',ylab='Species Richness',cex.lab=0.9,cex.axis=0.9,line=2)
+
+###2c Bray-Curtis Dissimilarity vs. taxonomic richness
+
+#Bray-Curtis of each dilution level
+for (i in 0){
+  assign(paste("BC",i,sep=""),vegdist(otu_swe_16S_2[grep(paste("0",i,sep=""),rownames(otu_swe_16S_2)),]))
+}
+
+for (i in 2:9){
+  assign(paste("BC",i,sep=""),vegdist(otu_swe_16S_2[grep(paste("0",i,sep=""),rownames(otu_swe_16S_2)),]))
+}
+
+for (i in 10:11){
+  assign(paste("BC",i,sep=""),vegdist(otu_swe_16S_2[grep(i,rownames(otu_swe_16S_2)),]))
+}
+
+
+BC_matrix=rbind(as.matrix(as.list(BC0)),as.matrix(as.list(BC2)),as.matrix(as.list(BC3)),as.matrix(as.list(BC4)),as.matrix(as.list(BC5)),
+                as.matrix(as.list(BC6)),as.matrix(as.list(BC7)),as.matrix(as.list(BC8)),as.matrix(as.list(BC9)),as.matrix(as.list(BC10)),as.matrix(as.list(BC11)))
+BC_matrix=as.data.frame(BC_matrix)
+
+
+dilution_matrix=c(rep('00',each=length(as.list(BC0))),rep('02',each=length(as.list(BC2))),rep('03',each=length(as.list(BC3))),
+                  rep('04',each=length(as.list(BC4))),rep('05',each=length(as.list(BC5))),rep('06',each=length(as.list(BC6))),
+                  rep('07',each=length(as.list(BC7))),rep('08',each=length(as.list(BC8))),rep('09',each=length(as.list(BC9))),
+                  rep('10',each=length(as.list(BC10))),rep('11',each=length(as.list(BC11))))
+
+dilution_matrix=as.data.frame(dilution_matrix)
+
+
+
+BC_dilution_matrix=merge(BC_matrix,dilution_matrix,by=0)
+names(BC_dilution_matrix)=c('rownames','BC','dilution')
+BC_dilution_matrix$dilution=as.factor(as.character(BC_dilution_matrix$dilution))
+BC_dilution_matrix$BC=as.numeric(as.character(BC_dilution_matrix$BC))
+
+plot(BC_dilution_matrix$dilution,BC_dilution_matrix$BC,outline=F,xlab='',ylab='')
+stripchart(BC~dilution,data=BC_dilution_matrix,vertical=T,
+           pch = 20,col=alpha('coral',alpha=0.3),method="jitter",
+           add = TRUE)
+
+title(xlab='log4(dilution fold)',ylab='Bray-Curtis Dissimilarity',line=2)
+
+
+```
+
+#Table S3 ANOVA for cell density and species richness
+```{r}
+
+
+otu_R2_cc_agg_modify=otu_R2_cc_agg[,1:3]
+otu_R2_cc_agg_modify$Group.1=substr(otu_R2_cc_agg_modify$Group.1,2,5)
+otu_R2_CO2_agg_modify=otu_R2_CO2_agg[,1:3]
+otu_R2_CO2_agg_modify$Group.1=substr(otu_R2_CO2_agg_modify$Group.1,2,5)
+
+div_swe_cc_stop_max_sr_prod=Reduce(function(x, y) merge(x, y, by.x='Row.names',by.y='Group.1'), 
+                                   list(div_swe_cc_stop,otu_R2_cc_agg_modify,otu_R2_CO2_agg_modify))
+div_swe_cc_stop_max_sr_prod$stop_cc=as.numeric(div_swe_cc_stop_max_sr_prod$stop_cc)
+
+fit_cc_II=lm(cc~log(stationary_species_richness.x)+log(stop_cc),data=div_swe_cc_stop_max_sr_prod)
+fit_CO2_II=lm(CO2~log(stationary_species_richness.x)+log(stop_cc),data=div_swe_cc_stop_max_sr_prod)
+
+ano_cc_sr_stopcc=Anova(fit_cc_II) 
+ano_CO2_sr_stopCO2=Anova(fit_CO2_II)
+
+ano_cc_sr_stopcc.xtable=xtable(ano_cc_sr_stopcc)
+display(ano_cc_sr_stopcc.xtable)[1:5] <- "E"
+
+ano_CO2_sr_stopCO2.xtable=xtable(ano_CO2_sr_stopCO2)
+display(ano_CO2_sr_stopCO2.xtable)[1:5] <- "E"
+
+```
+
+
+##Figure S5
+```{r}
+
+otu_overlap_R2_isolates_cc_95=otu_overlap_R2_isolates_cc[,colSums(otu_overlap_R2_isolates_cc)>0.95]
+otu_overlap_R2_isolates_cc_90=otu_overlap_R2_isolates_cc[,colSums(otu_overlap_R2_isolates_cc)>0.90]
+otu_overlap_R2_isolates_cc_85=otu_overlap_R2_isolates_cc[,colSums(otu_overlap_R2_isolates_cc)>0.85]
+otu_overlap_R2_isolates_cc_80=otu_overlap_R2_isolates_cc[,colSums(otu_overlap_R2_isolates_cc)>0.80]
+
+#png('./16S_adjusted_new/fig_paper/different_cutoff_coverage_cc.png',width=2400,height=600,res=300)
+par(mfrow=c(1,4))
+par(mar = c(3,3,3,1))
+
+plot(otu_R2_cc$sr,otu_R2_cc$cc
+     ,pch=16,cex.lab=1,cex.axis=1,col="grey90",xlim=c(0,55),xlab="",ylab="")
+title(main='95%',ylab="Max. cell count/mL",line=2)
+points(otu_R2_cc$sr[otu_R2_cc$Row.names %in% names(otu_overlap_R2_isolates_cc_95)],
+       otu_R2_cc$cc[otu_R2_cc$Row.names %in% names(otu_overlap_R2_isolates_cc_95)],pch=16,col="tomato1")
+
+plot(otu_R2_cc$sr,otu_R2_cc$cc
+     ,pch=16,cex.lab=1,cex.axis=1,col="grey90",xlim=c(0,55),xlab="",ylab="")
+title(main='90%',line=2)
+points(otu_R2_cc$sr[otu_R2_cc$Row.names %in% names(otu_overlap_R2_isolates_cc_90)],
+       otu_R2_cc$cc[otu_R2_cc$Row.names %in% names(otu_overlap_R2_isolates_cc_90)],pch=16,col="tomato1")
+
+plot(otu_R2_cc$sr,otu_R2_cc$cc
+     ,pch=16,cex.lab=1,cex.axis=1,col="grey90",xlim=c(0,55),xlab="",ylab="")
+title(main='85%',line=2)
+points(otu_R2_cc$sr[otu_R2_cc$Row.names %in% names(otu_overlap_R2_isolates_cc_85)],
+       otu_R2_cc$cc[otu_R2_cc$Row.names %in% names(otu_overlap_R2_isolates_cc_85)],pch=16,col="tomato1")
+plot(otu_R2_cc$sr,otu_R2_cc$cc
+     ,pch=16,cex.lab=1,cex.axis=1,col="grey90",xlim=c(0,55),xlab="",ylab="")
+title(main='80%',line=2)
+points(otu_R2_cc$sr[otu_R2_cc$Row.names %in% names(otu_overlap_R2_isolates_cc_80)],
+       otu_R2_cc$cc[otu_R2_cc$Row.names %in% names(otu_overlap_R2_isolates_cc_80)],pch=16,col="tomato1")
+#dev.off()
+
+
+
+otu_overlap_R2_isolates_CO2_early_40h_95=otu_overlap_R2_isolates_CO2_early_40h[,colSums(otu_overlap_R2_isolates_CO2_early_40h)>0.95]
+otu_overlap_R2_isolates_CO2_early_40h_90=otu_overlap_R2_isolates_CO2_early_40h[,colSums(otu_overlap_R2_isolates_CO2_early_40h)>0.90]
+otu_overlap_R2_isolates_CO2_early_40h_85=otu_overlap_R2_isolates_CO2_early_40h[,colSums(otu_overlap_R2_isolates_CO2_early_40h)>0.85]
+otu_overlap_R2_isolates_CO2_early_40h_80=otu_overlap_R2_isolates_CO2_early_40h[,colSums(otu_overlap_R2_isolates_CO2_early_40h)>0.80]
+
+otu_R2_CO2_early_40h=merge(otu_R2_sr_16S,R2_CO2_early_40h_1,by=0)
+names(otu_R2_CO2_early_40h)[2]="sr"
+
+#png('./16S_adjusted_new/fig_paper/different_cutoff_coverage_CO2.png',width=2400,height=600,res=300)
+par(mfrow=c(1,4))
+par(mar = c(3,3,3,1))
+
+plot(otu_R2_CO2_early_40h$sr,otu_R2_CO2_early_40h$CO2_early
+     ,pch=16,cex.lab=1,cex.axis=1,col="grey90",xlim=c(0,55),xlab="",ylab="")
+title(main='95%', ylab=expression("CO2 0-40h ("~paste(mu,g)~")"),line=2)
+points(otu_R2_CO2_early_40h$sr[otu_R2_CO2_early_40h$Row.names %in% names(otu_overlap_R2_isolates_CO2_early_40h_95)],
+       otu_R2_CO2_early_40h$CO2_early[otu_R2_CO2_early_40h$Row.names %in% names(otu_overlap_R2_isolates_CO2_early_40h_95)],pch=16,col="darkgoldenrod3")
+
+plot(otu_R2_CO2_early_40h$sr,otu_R2_CO2_early_40h$CO2_early
+     ,pch=16,cex.lab=1,cex.axis=1,col="grey90",xlim=c(0,55),xlab="",ylab="")
+title(main='90%' ,line=2)
+points(otu_R2_CO2_early_40h$sr[otu_R2_CO2_early_40h$Row.names %in% names(otu_overlap_R2_isolates_CO2_early_40h_90)],
+       otu_R2_CO2_early_40h$CO2_early[otu_R2_CO2_early_40h$Row.names %in% names(otu_overlap_R2_isolates_CO2_early_40h_90)],pch=16,col="darkgoldenrod3")
+
+plot(otu_R2_CO2_early_40h$sr,otu_R2_CO2_early_40h$CO2_early
+     ,pch=16,cex.lab=1,cex.axis=1,col="grey90",xlim=c(0,55),xlab="",ylab="")
+title(main='85%' ,line=2)
+points(otu_R2_CO2_early_40h$sr[otu_R2_CO2_early_40h$Row.names %in% names(otu_overlap_R2_isolates_CO2_early_40h_85)],
+       otu_R2_CO2_early_40h$CO2_early[otu_R2_CO2_early_40h$Row.names %in% names(otu_overlap_R2_isolates_CO2_early_40h_85)],pch=16,col="darkgoldenrod3")
+
+plot(otu_R2_CO2_early_40h$sr,otu_R2_CO2_early_40h$CO2_early
+     ,pch=16,cex.lab=1,cex.axis=1,col="grey90",xlim=c(0,55),xlab="",ylab="")
+title(main='80%' ,line=2)
+points(otu_R2_CO2_early_40h$sr[otu_R2_CO2_early_40h$Row.names %in% names(otu_overlap_R2_isolates_CO2_early_40h_80)],
+       otu_R2_CO2_early_40h$CO2_early[otu_R2_CO2_early_40h$Row.names %in% names(otu_overlap_R2_isolates_CO2_early_40h_80)],pch=16,col="darkgoldenrod3")
+#dev.off()
+
+otu_R2_constitute_isolates_rf_95=otu_overlap_R2_isolates_rf[,colSums(otu_overlap_R2_isolates_rf)>0.95]
+otu_R2_constitute_isolates_rf_90=otu_overlap_R2_isolates_rf[,colSums(otu_overlap_R2_isolates_rf)>0.90]
+otu_R2_constitute_isolates_rf_85=otu_overlap_R2_isolates_rf[,colSums(otu_overlap_R2_isolates_rf)>0.85]
+otu_R2_constitute_isolates_rf_80=otu_overlap_R2_isolates_rf[,colSums(otu_overlap_R2_isolates_rf)>0.80]
+
+otu_R2_rf=merge(otu_R2_sr_16S,R2_rf_1,by=0)
+names(otu_R2_rf)[2]="sr"
+
+#png('./16S_adjusted_new/fig_paper/different_cutoff_coverage_rf.png',width=2400,height=600,res=300)
+par(mfrow=c(1,4))
+par(mar = c(3,3,3,1))
+
+plot(otu_R2_rf$sr,otu_R2_rf$rf
+     ,pch=16,cex.lab=1,cex.axis=1,col="grey90",xlim=c(0,55),xlab="",ylab="")
+title(main='95%',ylab="Max protein(RFU)",line=2)
+points(otu_R2_rf$sr[otu_R2_rf$Row.names %in% names(otu_R2_constitute_isolates_rf_95)],
+       otu_R2_rf$rf[otu_R2_rf$Row.names %in% names(otu_R2_constitute_isolates_rf_95)],pch=16,col="darkcyan")
+
+plot(otu_R2_rf$sr,otu_R2_rf$rf
+     ,pch=16,cex.lab=1,cex.axis=1,col="grey90",xlim=c(0,55),xlab="",ylab="")
+title(main='90%',line=2)
+points(otu_R2_rf$sr[otu_R2_rf$Row.names %in% names(otu_R2_constitute_isolates_rf_90)],
+       otu_R2_rf$rf[otu_R2_rf$Row.names %in% names(otu_R2_constitute_isolates_rf_90)],pch=16,col="darkcyan")
+
+
+
+plot(otu_R2_rf$sr,otu_R2_rf$rf
+     ,pch=16,cex.lab=1,cex.axis=1,col="grey90",xlim=c(0,55),xlab="",ylab="")
+title(main='85%',line=2)
+points(otu_R2_rf$sr[otu_R2_rf$Row.names %in% names(otu_R2_constitute_isolates_rf_85)],
+       otu_R2_rf$rf[otu_R2_rf$Row.names %in% names(otu_R2_constitute_isolates_rf_85)],pch=16,col="darkcyan")
+
+
+plot(otu_R2_rf$sr,otu_R2_rf$rf
+     ,pch=16,cex.lab=1,cex.axis=1,col="grey90",xlim=c(0,55),xlab="",ylab="")
+title(main='80%',line=2)
+points(otu_R2_rf$sr[otu_R2_rf$Row.names %in% names(otu_R2_constitute_isolates_rf_80)],
+       otu_R2_rf$rf[otu_R2_rf$Row.names %in% names(otu_R2_constitute_isolates_rf_80)],pch=16,col="darkcyan")
+
+#dev.off()
+
+
+
+```
+
+##Example for Table S3
+
+```{r,output=F,warning=F}
+#transformed otu tables & species richness
+
+t_otu_R2_scale_16S=as.data.frame(t(otu_R2_scale_16S))
+otu_R2_sr_16S=as.data.frame(specnumber(t_otu_R2_scale_16S))
+
+#combine sr, otus and productivity
+otu_R2_scale_16S_sr=merge(t_otu_R2_scale_16S,otu_R2_sr_16S,by=0)
+
+###match to identified taxa
+taxa_list=readRDS('taxa_species.rds')
+taxa_list$Genus.y=NULL
+taxa_list$asv_number=paste('ASV',rownames(taxa_list),sep='_')
+
+taxa_list_1=as.data.frame(apply(taxa_list[,2:ncol(taxa_list)], 1, paste, collapse=";"))
+
+rownames(taxa_list_1)=taxa_list$Row.names
+names(taxa_list_1)='taxa'
+
+otu_R2_scale_16S_sr_CO2=merge(otu_R2_scale_16S_sr,R2_CO2_1,by.x='Row.names',by.y=0)
+rownames(otu_R2_scale_16S_sr_CO2)=otu_R2_scale_16S_sr_CO2$Row.names
+otu_R2_scale_16S_sr_CO2$Row.names=NULL
+
+names(otu_R2_scale_16S_sr_CO2)[ncol(otu_R2_scale_16S_sr_CO2)-1]='sr'
+names(otu_R2_scale_16S_sr_CO2)[ncol(otu_R2_scale_16S_sr_CO2)]='CO2'
+
+#find unique species richness
+sr_unique=unique(otu_R2_scale_16S_sr_CO2$sr)
+sr_unique_1=sort(sr_unique)
+
+#create a list for taxa that is correlated with productivity in every species richness window of 2
+prod_corr_taxa_CO2_2=lapply(1:length(sr_unique_1), matrix, data= NA, ncol=5,nrow=0)
+prod_corr_taxa_CO2_abundance_2=rep(list(NA),length(sr_unique_1))
+prod_corr_taxa_CO2_prod_2=rep(list(NA),length(sr_unique_1))
+
+for (i in 1:(length(sr_unique_1)-1)){
+  
+  otu_R2_scale_16S_sr_CO2_1=otu_R2_scale_16S_sr_CO2[otu_R2_scale_16S_sr_CO2$sr %in% sr_unique_1[c(i,i+1)],]
+  prod_corr_taxa_CO2_prod_2[[i]]=c(prod_corr_taxa_CO2_prod_2[[i]],otu_R2_scale_16S_sr_CO2_1$CO2)
+  pall_2=rep(NA,(ncol(otu_R2_scale_16S_sr_CO2_1)-2))
+  print(dim(otu_R2_scale_16S_sr_CO2_1))
+  if (nrow(otu_R2_scale_16S_sr_CO2_1)>8) {
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){
+      if (sum(otu_R2_scale_16S_sr_CO2_1[,j]>0)>2 && sd(otu_R2_scale_16S_sr_CO2_1[,j])>=0.05){
+        pall_2[j]=cor.test(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall')$p.value }}
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){    
+      
+      if (!is.na(p.adjust(pall_2,'BH')[j])){
+        if (p.adjust(pall_2,'BH')[j]<0.05){
+          
+          a=c(names(otu_R2_scale_16S_sr_CO2_1)[j],cor(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall'),p.adjust(pall_2,'BH')[j],sr_unique_1[i],sr_unique_1[i+1])
+          prod_corr_taxa_CO2_2[[i]]=rbind(prod_corr_taxa_CO2_2[[ceiling(i)]],a)
+          prod_corr_taxa_CO2_abundance_2[[i]]=c(prod_corr_taxa_CO2_abundance_2[[ceiling(i)]],otu_R2_scale_16S_sr_CO2_1[,j,drop=F])   
+        }
+      }
+    }
+  }
+}
+
+prod_corr_taxa_CO2_3=lapply(1:(length(sr_unique_1)-2), matrix, data= NA, ncol=5,nrow=0)
+prod_corr_taxa_CO2_abundance_3=rep(list(NA),(length(sr_unique_1)-2))
+prod_corr_taxa_CO2_prod_3=rep(list(NA),(length(sr_unique_1)-2))
+
+for (i in 1:(length(sr_unique_1)-2)){
+  
+  otu_R2_scale_16S_sr_CO2_1=otu_R2_scale_16S_sr_CO2[otu_R2_scale_16S_sr_CO2$sr %in% sr_unique_1[c(i,i+1,i+2)],]
+  prod_corr_taxa_CO2_prod_3[[i]]=c(prod_corr_taxa_CO2_prod_3[[i]],otu_R2_scale_16S_sr_CO2_1$CO2)
+  pall_3=rep(NA,(ncol(otu_R2_scale_16S_sr_CO2_1)-2))
+  print(dim(otu_R2_scale_16S_sr_CO2_1))
+  if (nrow(otu_R2_scale_16S_sr_CO2_1)>8) {
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){
+      if (sum(otu_R2_scale_16S_sr_CO2_1[,j]>0)>2 && sd(otu_R2_scale_16S_sr_CO2_1[,j])>=0.05){
+        pall_3[j]=cor.test(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall')$p.value }}
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){    
+      
+      if (!is.na(p.adjust(pall_3,'BH')[j])){
+        if (p.adjust(pall_3,'BH')[j]<0.05){
+          
+          a=c(names(otu_R2_scale_16S_sr_CO2_1)[j],cor(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall'),p.adjust(pall_3,'BH')[j],sr_unique_1[i],sr_unique_1[i+2])
+          prod_corr_taxa_CO2_3[[i]]=rbind(prod_corr_taxa_CO2_3[[i]],a)
+          prod_corr_taxa_CO2_abundance_3[[i]]=c(prod_corr_taxa_CO2_abundance_3[[i]],otu_R2_scale_16S_sr_CO2_1[,j,drop=F])   
+        }
+        
+      }
+    }
+  }
+}
+
+prod_corr_taxa_CO2_4=lapply(1:(length(sr_unique_1)-3), matrix, data= NA, ncol=5,nrow=0)
+prod_corr_taxa_CO2_abundance_4=rep(list(NA),(length(sr_unique_1)-3))
+prod_corr_taxa_CO2_prod_4=rep(list(NA),(length(sr_unique_1)-3))
+
+for (i in 1:(length(sr_unique_1)-3)){
+  
+  otu_R2_scale_16S_sr_CO2_1=otu_R2_scale_16S_sr_CO2[otu_R2_scale_16S_sr_CO2$sr %in% sr_unique_1[seq(i,i+3)],]
+  prod_corr_taxa_CO2_prod_4[[i]]=c(prod_corr_taxa_CO2_prod_4[[i]],otu_R2_scale_16S_sr_CO2_1$CO2)
+  pall_4=rep(NA,(ncol(otu_R2_scale_16S_sr_CO2_1)-2))
+  print(rownames(otu_R2_scale_16S_sr_CO2_1))
+  if (nrow(otu_R2_scale_16S_sr_CO2_1)>8) {
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){
+      if (sum(otu_R2_scale_16S_sr_CO2_1[,j]>0)>2 && sd(otu_R2_scale_16S_sr_CO2_1[,j])>=0.05){
+        pall_4[j]=cor.test(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall')$p.value }}
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){    
+      
+      if (!is.na(p.adjust(pall_4,'BH')[j])){
+        if (p.adjust(pall_4,'BH')[j]<0.05){
+          
+          a=c(names(otu_R2_scale_16S_sr_CO2_1)[j],cor(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall'),p.adjust(pall_4,'BH')[j],sr_unique_1[i],sr_unique_1[i+3])
+          prod_corr_taxa_CO2_4[[i]]=rbind(prod_corr_taxa_CO2_4[[i]],a)
+          prod_corr_taxa_CO2_abundance_4[[i]]=c(prod_corr_taxa_CO2_abundance_4[[i]],otu_R2_scale_16S_sr_CO2_1[,j,drop=F])   
+        }
+      }
+      
+    }
+  }
+}
+
+prod_corr_taxa_CO2_5=lapply(1:(length(sr_unique_1)-4), matrix, data= NA, ncol=5,nrow=0)
+prod_corr_taxa_CO2_abundance_5=rep(list(NA),(length(sr_unique_1)-4))
+prod_corr_taxa_CO2_prod_5=rep(list(NA),(length(sr_unique_1)-4))
+
+for (i in 1:(length(sr_unique_1)-4)){
+  
+  otu_R2_scale_16S_sr_CO2_1=otu_R2_scale_16S_sr_CO2[otu_R2_scale_16S_sr_CO2$sr %in% sr_unique_1[seq(i,i+4)],]
+  prod_corr_taxa_CO2_prod_5[[i]]=c(prod_corr_taxa_CO2_prod_5[[i]],otu_R2_scale_16S_sr_CO2_1$CO2)
+  pall_5=rep(NA,(ncol(otu_R2_scale_16S_sr_CO2_1)-2))
+  print(rownames(otu_R2_scale_16S_sr_CO2_1))
+  if (nrow(otu_R2_scale_16S_sr_CO2_1)>8) {
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){
+      if (sum(otu_R2_scale_16S_sr_CO2_1[,j]>0)>2 && sd(otu_R2_scale_16S_sr_CO2_1[,j])>=0.05){
+        pall_5[j]=cor.test(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall')$p.value }}
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){    
+      
+      if (!is.na(p.adjust(pall_5,'BH')[j])){
+        if (p.adjust(pall_5,'BH')[j]<0.05){
+          
+          a=c(names(otu_R2_scale_16S_sr_CO2_1)[j],cor(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall'),p.adjust(pall_5,'BH')[j],sr_unique_1[i],sr_unique_1[i+4])
+          prod_corr_taxa_CO2_5[[i]]=rbind(prod_corr_taxa_CO2_5[[i]],a)
+          prod_corr_taxa_CO2_abundance_5[[i]]=c(prod_corr_taxa_CO2_abundance_5[[i]],otu_R2_scale_16S_sr_CO2_1[,j,drop=F])   
+        }
+      }
+      
+    }
+  }
+}
+
+prod_corr_taxa_CO2_6=lapply(1:(length(sr_unique_1)-5), matrix, data= NA, ncol=5,nrow=0)
+prod_corr_taxa_CO2_abundance_6=rep(list(NA),(length(sr_unique_1)-5))
+prod_corr_taxa_CO2_prod_6=rep(list(NA),(length(sr_unique_1)-5))
+
+for (i in 1:(length(sr_unique_1)-5)){
+  
+  otu_R2_scale_16S_sr_CO2_1=otu_R2_scale_16S_sr_CO2[otu_R2_scale_16S_sr_CO2$sr %in% sr_unique_1[seq(i,i+5)],]
+  prod_corr_taxa_CO2_prod_6[[i]]=c(prod_corr_taxa_CO2_prod_6[[i]],otu_R2_scale_16S_sr_CO2_1$CO2)
+  pall_6=rep(NA,(ncol(otu_R2_scale_16S_sr_CO2_1)-2))
+  print(rownames(otu_R2_scale_16S_sr_CO2_1))
+  if (nrow(otu_R2_scale_16S_sr_CO2_1)>8) {
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){
+      if (sum(otu_R2_scale_16S_sr_CO2_1[,j]>0)>2 && sd(otu_R2_scale_16S_sr_CO2_1[,j])>=0.05){
+        pall_6[j]=cor.test(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall')$p.value }}
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){    
+      
+      if (!is.na(p.adjust(pall_6,'BH')[j])){
+        if (p.adjust(pall_6,'BH')[j]<0.05){
+          
+          a=c(names(otu_R2_scale_16S_sr_CO2_1)[j],cor(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall'),p.adjust(pall_6,'BH')[j],sr_unique_1[i],sr_unique_1[i+5])
+          prod_corr_taxa_CO2_6[[i]]=rbind(prod_corr_taxa_CO2_6[[i]],a)
+          prod_corr_taxa_CO2_abundance_6[[i]]=c(prod_corr_taxa_CO2_abundance_6[[i]],otu_R2_scale_16S_sr_CO2_1[,j,drop=F])   
+        }
+      }
+      
+    }
+  }
+}
+
+prod_corr_taxa_CO2_7=lapply(1:(length(sr_unique_1)-6), matrix, data= NA, ncol=5,nrow=0)
+prod_corr_taxa_CO2_abundance_7=rep(list(NA),(length(sr_unique_1)-6))
+prod_corr_taxa_CO2_prod_7=rep(list(NA),(length(sr_unique_1)-6))
+
+for (i in 1:(length(sr_unique_1)-6)){
+  
+  otu_R2_scale_16S_sr_CO2_1=otu_R2_scale_16S_sr_CO2[otu_R2_scale_16S_sr_CO2$sr %in% sr_unique_1[seq(i,i+6)],]
+  prod_corr_taxa_CO2_prod_7[[i]]=c(prod_corr_taxa_CO2_prod_7[[i]],otu_R2_scale_16S_sr_CO2_1$CO2)
+  pall_7=rep(NA,(ncol(otu_R2_scale_16S_sr_CO2_1)-2))
+  
+  if (nrow(otu_R2_scale_16S_sr_CO2_1)>8) {
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){
+      if (sum(otu_R2_scale_16S_sr_CO2_1[,j]>0)>2 && sd(otu_R2_scale_16S_sr_CO2_1[,j])>=0.05){
+        pall_7[j]=cor.test(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall')$p.value }}
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){    
+      
+      if (!is.na(p.adjust(pall_7,'BH')[j])){
+        if (p.adjust(pall_7,'BH')[j]<0.05){
+          
+          a=c(names(otu_R2_scale_16S_sr_CO2_1)[j],cor(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall'),p.adjust(pall_7,'BH')[j],sr_unique_1[i],sr_unique_1[i+6])
+          prod_corr_taxa_CO2_7[[i]]=rbind(prod_corr_taxa_CO2_7[[i]],a)
+          prod_corr_taxa_CO2_abundance_7[[i]]=c(prod_corr_taxa_CO2_abundance_7[[i]],otu_R2_scale_16S_sr_CO2_1[,j,drop=F])   
+        }
+      }
+      
+    }
+  }
+}
+
+
+prod_corr_taxa_CO2_8=lapply(1:(length(sr_unique_1)-7), matrix, data= NA, ncol=5,nrow=0)
+prod_corr_taxa_CO2_abundance_8=rep(list(NA),(length(sr_unique_1)-7))
+prod_corr_taxa_CO2_prod_8=rep(list(NA),(length(sr_unique_1)-7))
+
+for (i in 1:(length(sr_unique_1)-7)){
+  
+  otu_R2_scale_16S_sr_CO2_1=otu_R2_scale_16S_sr_CO2[otu_R2_scale_16S_sr_CO2$sr %in% sr_unique_1[seq(i,i+7)],]
+  prod_corr_taxa_CO2_prod_8[[i]]=c(prod_corr_taxa_CO2_prod_8[[i]],otu_R2_scale_16S_sr_CO2_1$CO2)
+  pall_8=rep(NA,(ncol(otu_R2_scale_16S_sr_CO2_1)-2))
+  
+  if (nrow(otu_R2_scale_16S_sr_CO2_1)>8) {
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){
+      if (sum(otu_R2_scale_16S_sr_CO2_1[,j]>0)>2 && sd(otu_R2_scale_16S_sr_CO2_1[,j])>=0.05){
+        pall_8[j]=cor.test(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall')$p.value }}
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){    
+      
+      if (!is.na(p.adjust(pall_8,'BH')[j])){
+        if (p.adjust(pall_8,'BH')[j]<0.05){
+          
+          a=c(names(otu_R2_scale_16S_sr_CO2_1)[j],cor(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall'),p.adjust(pall_8,'BH')[j],sr_unique_1[i],sr_unique_1[i+7])
+          prod_corr_taxa_CO2_8[[i]]=rbind(prod_corr_taxa_CO2_8[[i]],a)
+          prod_corr_taxa_CO2_abundance_8[[i]]=c(prod_corr_taxa_CO2_abundance_8[[i]],otu_R2_scale_16S_sr_CO2_1[,j,drop=F])   
+        }
+      }
+      
+    }
+  }
+}
+
+prod_corr_taxa_CO2_9=lapply(1:(length(sr_unique_1)-8), matrix, data= NA, ncol=5,nrow=0)
+prod_corr_taxa_CO2_abundance_9=rep(list(NA),(length(sr_unique_1)-8))
+prod_corr_taxa_CO2_prod_9=rep(list(NA),(length(sr_unique_1)-8))
+
+for (i in 1:(length(sr_unique_1)-8)){
+  
+  otu_R2_scale_16S_sr_CO2_1=otu_R2_scale_16S_sr_CO2[otu_R2_scale_16S_sr_CO2$sr %in% sr_unique_1[seq(i,i+8)],]
+  prod_corr_taxa_CO2_prod_9[[i]]=c(prod_corr_taxa_CO2_prod_9[[i]],otu_R2_scale_16S_sr_CO2_1$CO2)
+  pall_9=rep(NA,(ncol(otu_R2_scale_16S_sr_CO2_1)-2))
+  
+  if (nrow(otu_R2_scale_16S_sr_CO2_1)>8) {
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){
+      if (sum(otu_R2_scale_16S_sr_CO2_1[,j]>0)>2 && sd(otu_R2_scale_16S_sr_CO2_1[,j])>=0.05){
+        pall_9[j]=cor.test(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall')$p.value }}
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){    
+      
+      if (!is.na(p.adjust(pall_9,'BH')[j])){
+        if (p.adjust(pall_9,'BH')[j]<0.05){
+          
+          a=c(names(otu_R2_scale_16S_sr_CO2_1)[j],cor(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall'),p.adjust(pall_9,'BH')[j],sr_unique_1[i],sr_unique_1[i+8])
+          prod_corr_taxa_CO2_9[[i]]=rbind(prod_corr_taxa_CO2_9[[i]],a)
+          prod_corr_taxa_CO2_abundance_9[[i]]=c(prod_corr_taxa_CO2_abundance_9[[i]],otu_R2_scale_16S_sr_CO2_1[,j,drop=F])   
+        }
+      }
+      
+    }
+  }
+}
+
+
+prod_corr_taxa_CO2_10=lapply(1:(length(sr_unique_1)-9), matrix, data= NA, ncol=5,nrow=0)
+prod_corr_taxa_CO2_abundance_10=rep(list(NA),(length(sr_unique_1)-9))
+prod_corr_taxa_CO2_prod_10=rep(list(NA),(length(sr_unique_1)-9))
+
+for (i in 1:(length(sr_unique_1)-9)){
+  
+  otu_R2_scale_16S_sr_CO2_1=otu_R2_scale_16S_sr_CO2[otu_R2_scale_16S_sr_CO2$sr %in% sr_unique_1[seq(i,i+9)],]
+  prod_corr_taxa_CO2_prod_10[[i]]=c(prod_corr_taxa_CO2_prod_10[[i]],otu_R2_scale_16S_sr_CO2_1$CO2)
+  pall_10=rep(NA,(ncol(otu_R2_scale_16S_sr_CO2_1)-2))
+  
+  if (nrow(otu_R2_scale_16S_sr_CO2_1)>8) {
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){
+      if (sum(otu_R2_scale_16S_sr_CO2_1[,j]>0)>2 && sd(otu_R2_scale_16S_sr_CO2_1[,j])>=0.05){
+        pall_10[j]=cor.test(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall')$p.value }}
+    
+    for (j in 1:(ncol(otu_R2_scale_16S_sr_CO2_1)-2)){    
+      
+      if (!is.na(p.adjust(pall_10,'BH')[j])){
+        if (p.adjust(pall_10,'BH')[j]<0.05){
+          
+          a=c(names(otu_R2_scale_16S_sr_CO2_1)[j],cor(otu_R2_scale_16S_sr_CO2_1[,j],otu_R2_scale_16S_sr_CO2_1$CO2,method='kendall'),p.adjust(pall_10,'BH')[j],sr_unique_1[i],sr_unique_1[i+9])
+          prod_corr_taxa_CO2_10[[i]]=rbind(prod_corr_taxa_CO2_10[[i]],a)
+          prod_corr_taxa_CO2_abundance_10[[i]]=c(prod_corr_taxa_CO2_abundance_10[[i]],otu_R2_scale_16S_sr_CO2_1[,j,drop=F])   
+        }
+      }
+      
+    }
+  }
+}
+
+
+prod_corr_taxa_CO2_taxa_2=lapply(prod_corr_taxa_CO2_2,function(x) cbind(as.character(taxa_list_1$taxa[rownames(taxa_list_1) %in% x[,1]]),x[,2:5,drop=F]))
+prod_corr_taxa_CO2_taxa_3=lapply(prod_corr_taxa_CO2_3,function(x) cbind(as.character(taxa_list_1$taxa[rownames(taxa_list_1) %in% x[,1]]),x[,2:5,drop=F]))
+prod_corr_taxa_CO2_taxa_4=lapply(prod_corr_taxa_CO2_4,function(x) cbind(as.character(taxa_list_1$taxa[rownames(taxa_list_1) %in% x[,1]]),x[,2:5,drop=F]))
+prod_corr_taxa_CO2_taxa_5=lapply(prod_corr_taxa_CO2_5,function(x) cbind(as.character(taxa_list_1$taxa[rownames(taxa_list_1) %in% x[,1]]),x[,2:5,drop=F]))
+prod_corr_taxa_CO2_taxa_6=lapply(prod_corr_taxa_CO2_6,function(x) cbind(as.character(taxa_list_1$taxa[rownames(taxa_list_1) %in% x[,1]]),x[,2:5,drop=F]))
+prod_corr_taxa_CO2_taxa_7=lapply(prod_corr_taxa_CO2_7,function(x) cbind(as.character(taxa_list_1$taxa[rownames(taxa_list_1) %in% x[,1]]),x[,2:5,drop=F]))
+prod_corr_taxa_CO2_taxa_8=lapply(prod_corr_taxa_CO2_8,function(x) cbind(as.character(taxa_list_1$taxa[rownames(taxa_list_1) %in% x[,1]]),x[,2:5,drop=F]))
+prod_corr_taxa_CO2_taxa_9=lapply(prod_corr_taxa_CO2_9,function(x) cbind(as.character(taxa_list_1$taxa[rownames(taxa_list_1) %in% x[,1]]),x[,2:5,drop=F]))
+prod_corr_taxa_CO2_taxa_10=lapply(prod_corr_taxa_CO2_10,function(x) cbind(as.character(taxa_list_1$taxa[rownames(taxa_list_1) %in% x[,1]]),x[,2:5,drop=F]))
+
+prod_corr_list_CO2=list(prod_corr_taxa_CO2_taxa_2,prod_corr_taxa_CO2_taxa_3,prod_corr_taxa_CO2_taxa_4,prod_corr_taxa_CO2_taxa_5,prod_corr_taxa_CO2_taxa_6,
+                       prod_corr_taxa_CO2_taxa_7,prod_corr_taxa_CO2_taxa_8,prod_corr_taxa_CO2_taxa_9,prod_corr_taxa_CO2_taxa_10)
+prod_corr_matrix_CO2=lapply(prod_corr_list_CO2,function(x) unlist( unlist(lapply(x,function(y) t(y)))))
+prod_corr_matrix_CO2=unlist(prod_corr_matrix_CO2)
+
+prod_corr_matrix_CO2_1=matrix(prod_corr_matrix_CO2,ncol=5,byrow = T)
+
+prod_corr_matrix_CO2_1=prod_corr_matrix_CO2_1[order(as.numeric(prod_corr_matrix_CO2_1[,4])),]
+write.csv(prod_corr_matrix_CO2_1,'prod_corr_CO2_taxa_110h.csv')
+
+
+
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
